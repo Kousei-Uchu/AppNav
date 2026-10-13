@@ -1,0 +1,108 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "NavGraph",
+  "scopeName": "source.navgraph",
+  "patterns": [
+    { "include": "#header" },
+    { "include": "#declaration" },
+    { "include": "#edge" },
+    { "include": "#action" },
+    { "include": "#attributes" },
+    { "include": "#value" },
+    { "include": "#comment" }
+  ],
+  "repository": {
+    "comment": {
+      "match": "#.*$",
+      "name": "comment.line.number-sign.navgraph"
+    },
+    "header": {
+      "match": "^\\s*(NAVGRAPH)(/)(\\d+)",
+      "captures": {
+        "1": { "name": "keyword.control.header.navgraph" },
+        "2": { "name": "punctuation.separator.navgraph" },
+        "3": { "name": "constant.numeric.navgraph" }
+      }
+    },
+    "declaration": {
+      "patterns": [
+        {
+          "match": "\\b(APP)\\b",
+          "name": "keyword.control.navgraph"
+        },
+        {
+          "match": "\\b(VAR)\\s+([A-Za-z_][A-Za-z0-9_]*)\\s*(:)\\s*(string|number|boolean|null|object|array|any)\\b",
+          "captures": {
+            "1": { "name": "keyword.control.navgraph" },
+            "2": { "name": "variable.other.constant.navgraph" },
+            "3": { "name": "punctuation.separator.navgraph" },
+            "4": { "name": "support.type.primitive.navgraph" }
+          }
+        },
+        {
+          "match": "\\b(SCREEN)\\s+([A-Za-z_][A-Za-z0-9_.:]*)",
+          "captures": {
+            "1": { "name": "keyword.control.navgraph" },
+            "2": { "name": "entity.name.type.screen.navgraph" }
+          }
+        },
+        {
+          "match": "^\\s*(END)\\b",
+          "captures": { "1": { "name": "keyword.control.navgraph" } }
+        }
+      ]
+    },
+    "edge": {
+      "match": "([A-Za-z_][A-Za-z0-9_.:]*)\\s*(->)\\s*([A-Za-z_][A-Za-z0-9_.:]*)",
+      "captures": {
+        "1": { "name": "entity.name.type.screen.navgraph" },
+        "2": { "name": "keyword.operator.arrow.navgraph" },
+        "3": { "name": "entity.name.type.screen.navgraph" }
+      }
+    },
+    "action": {
+      "match": "\\b(DO)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+      "captures": {
+        "1": { "name": "keyword.control.navgraph" },
+        "2": { "name": "entity.name.function.action.navgraph" }
+      }
+    },
+    "attributes": {
+      "match": "\\b(cost|if|id|label|weight)\\s*(=)",
+      "captures": {
+        "1": { "name": "variable.parameter.attribute.navgraph" },
+        "2": { "name": "keyword.operator.assignment.navgraph" }
+      }
+    },
+    "value": {
+      "patterns": [
+        {
+          "match": "\"(?:[^\"\\\\]|\\\\.)*\"(?=\\s*:)",
+          "name": "support.type.property-name.navgraph"
+        },
+        {
+          "begin": "\"",
+          "end": "\"",
+          "name": "string.quoted.double.navgraph",
+          "patterns": [
+            { "match": "\\\\.", "name": "constant.character.escape.navgraph" },
+            { "match": "\\$\\$[A-Za-z_][A-Za-z0-9_]*\\$\\$", "name": "constant.character.escape.navgraph" },
+            { "match": "\\$[A-Za-z_][A-Za-z0-9_]*\\$", "name": "variable.other.template.navgraph" }
+          ]
+        },
+        {
+          "match": "-?\\b\\d+(?:\\.\\d+)?(?:[eE][+-]?\\d+)?\\b",
+          "name": "constant.numeric.navgraph"
+        },
+        {
+          "match": "\\b(true|false|null)\\b",
+          "name": "constant.language.navgraph"
+        },
+        {
+          "match": "\\b(and|or|not|in|contains)\\b",
+          "name": "keyword.operator.word.navgraph"
+        }
+      ]
+    }
+  }
+}

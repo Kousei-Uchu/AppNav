@@ -1,0 +1,158 @@
+{
+  "name": "routegraph-vscode",
+  "displayName": "RouteGraph",
+  "description": "Language support for .navgraph files: live validation, hover and go to definition, an interactive graph preview, and route finding.",
+  "version": "0.1.0",
+  "publisher": "kousei-uchu",
+  "license": "MIT",
+  "private": true,
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Linters",
+    "Visualization"
+  ],
+  "keywords": [
+    "navgraph",
+    "routegraph",
+    "navigation",
+    "graph",
+    "react-native"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Kousei-Uchu/routegraph.git",
+    "directory": "packages/vscode"
+  },
+  "main": "./dist/extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "navgraph",
+        "aliases": [
+          "NavGraph",
+          "navgraph"
+        ],
+        "extensions": [
+          ".navgraph"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "navgraph",
+        "scopeName": "source.navgraph",
+        "path": "./syntaxes/navgraph.tmLanguage.json"
+      }
+    ],
+    "jsonValidation": [
+      {
+        "fileMatch": "*.navschema",
+        "url": "./schemas/navschema-v1.schema.json"
+      }
+    ],
+    "configurationDefaults": {
+      "files.associations": {
+        "*.navschema": "json"
+      }
+    },
+    "commands": [
+      {
+        "command": "routegraph.showPreview",
+        "title": "Open Graph Preview",
+        "category": "RouteGraph",
+        "icon": "$(type-hierarchy)"
+      },
+      {
+        "command": "routegraph.findRoute",
+        "title": "Find Route Between Screens",
+        "category": "RouteGraph"
+      },
+      {
+        "command": "routegraph.copyInstructions",
+        "title": "Copy Route Instructions as JSON",
+        "category": "RouteGraph"
+      }
+    ],
+    "menus": {
+      "editor/title": [
+        {
+          "command": "routegraph.showPreview",
+          "when": "resourceLangId == navgraph",
+          "group": "navigation"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "routegraph.showPreview",
+          "when": "editorLangId == navgraph"
+        },
+        {
+          "command": "routegraph.findRoute",
+          "when": "editorLangId == navgraph"
+        },
+        {
+          "command": "routegraph.copyInstructions",
+          "when": "editorLangId == navgraph"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "RouteGraph",
+      "properties": {
+        "routegraph.schema": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Path to a `.navschema` file used to validate every `.navgraph`. Relative paths resolve against the workspace folder. When empty, a `.navschema` next to the graph with the same base name is used if it exists."
+        },
+        "routegraph.algorithm": {
+          "type": "string",
+          "enum": [
+            "astar",
+            "dijkstra",
+            "bfs"
+          ],
+          "default": "astar",
+          "description": "Pathfinding algorithm used by Find Route and the preview."
+        },
+        "routegraph.strictConditions": {
+          "type": "boolean",
+          "default": false,
+          "description": "Report edge conditions that use names which are not declared with VAR."
+        },
+        "routegraph.validateOnType": {
+          "type": "boolean",
+          "default": true,
+          "description": "Validate while typing. When off, validation runs on open and save."
+        },
+        "routegraph.routeVariables": {
+          "type": "object",
+          "default": {},
+          "description": "Values for VAR names used when finding routes, for example { \"SIGNED_IN\": true }. These override defaults declared in the graph."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "node esbuild.mjs",
+    "watch": "node esbuild.mjs --watch",
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.test.json",
+    "test": "vitest run",
+    "package": "npm run typecheck && npm test && npm run build && vsce package --no-dependencies",
+    "vscode:prepublish": "node esbuild.mjs --minify"
+  },
+  "devDependencies": {
+    "@types/jsdom": "^30.0.0",
+    "@types/node": "^20.14.0",
+    "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^3.0.0",
+    "esbuild": "^0.24.0",
+    "jsdom": "^25.0.1",
+    "routegraph": "^0.1.0",
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0"
+  }
+}
