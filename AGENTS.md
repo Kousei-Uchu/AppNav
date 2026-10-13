@@ -1,0 +1,42 @@
+# AGENTS.md
+
+Guidance for AI coding agents. Part 1 is for projects that use appnav. Part 2 is for working on the appnav repository itself.
+
+## Part 1: Using appnav in a project
+
+appnav models an app as a directed graph of screens (`.navgraph` text), finds routes, and emits JSON instructions. Read `llms.txt` in this package for the full cheat sheet, and `README.md` for the reference.
+
+Checklist when generating or editing a `.navgraph`:
+1. Start with `NAVGRAPH/2`. Declare every `VAR` that a `$NAME$` reference uses.
+2. Declare each `SCREEN` once. Edge endpoints must be declared screens.
+3. Write both directions explicitly. Reverse edges are never inferred.
+4. Every `DO TYPE` must exist in the active schema, and payloads must satisfy its `required` and `properties`.
+5. Costs are non-negative numbers. Use cost for "how bad is this transition", not for action counts.
+6. Quote `if=` expressions that contain commas or brackets.
+7. Validate with `validateGraph(parseGraph(text))` or `indexTreeFromText(text, { diagnostics: "collect" })` and read `diagnostics` (each has code, line, column).
+
+Checklist when writing code against the API:
+- Routes are synchronous. Instruction building is async by default (`buildInstructions`) with a sync twin (`buildInstructionsSync`).
+- React Native: use `indexTreeFromText` with bundled text, or pass `readFile` to `indexTree`.
+- Extensions are local trusted code passed in `buildInstructions(path, { extensions })`. Never place code in a `.navgraph`.
+- Use `tryCalculatePath` when "no route" is an expected outcome.
+
+## Part 2: Working on this repository
+
+Commands:
+- `npm install`
+- `npm run typecheck` (strict TS, includes tests)
+- `npm test` (vitest, 88 tests)
+- `npm run build` (tsup, CJS plus ESM plus d.ts into `dist/`)
+- `npm run prepublishOnly` runs all of the above
+
+Layout (`src/`): `parser.ts` (navgraph text to Graph IR), `schema.ts` (default schema, inheritance, payload validation), `graph.ts` (validation, indexing, `NavigationTree`), `conditions.ts` (safe expression language), `variables.ts` (scopes and `$VAR$` resolution), `pathfinding.ts` (A*, Dijkstra, BFS, heap), `extensions.ts` and `instructions.ts` (hooks and builder), `drive.ts` (generator drivers), `runtime.ts` (optional executor), `index.ts` (public exports).
+
+Rules to preserve:
+- No Node-only APIs in the core. File access goes through `files.ts` and the `readFile` option. No `require`, no dynamic `import()` with variables (Metro rejects them).
+- Sync and async builders share one generator implementation in `drive.ts`. Do not fork logic between them.
+- Parser and pathfinder stay deterministic. Tie breaking is by estimate, heuristic, then discovery order.
+- Output stays plain JSON. Extension output is namespaced and validated.
+- Graph files never execute code.
+- Copy and docs style: plain prose, no em dashes, no emoji, no ASCII art.
+- New behavior needs a test in `tests/`. Keep `npm run typecheck` clean.

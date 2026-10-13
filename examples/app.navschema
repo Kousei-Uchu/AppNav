@@ -1,0 +1,19 @@
+{
+  "$schema": "https://appnav.dev/schema/v1",
+  "schemaVersion": 1,
+  "name": "example-store",
+  "extends": "default",
+  "actions": {
+    "SCAN_QR": {
+      "description": "Project specific QR scan action",
+      "required": ["camera"],
+      "properties": {
+        "camera": { "type": "string" },
+        "timeoutMs": { "type": "number" }
+      }
+    }
+  },
+  "edgeMetadata": {
+    "label": { "type": "string" }
+  }
+}

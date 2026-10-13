@@ -1,0 +1,50 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://appnav.dev/schema/v1",
+  "title": "AppNav .navschema v1",
+  "type": "object",
+  "required": ["schemaVersion"],
+  "properties": {
+    "$schema": { "type": "string" },
+    "schemaVersion": { "const": 1 },
+    "name": { "type": "string" },
+    "extends": { "type": "string" },
+    "overrides": { "type": "array", "items": { "type": "string" } },
+    "remove": { "type": "array", "items": { "type": "string" } },
+    "actions": {
+      "type": "object",
+      "propertyNames": { "pattern": "^[A-Z][A-Z0-9_]*$" },
+      "additionalProperties": { "$ref": "#/definitions/property" }
+    },
+    "edgeMetadata": { "type": "object", "additionalProperties": { "$ref": "#/definitions/property" } },
+    "screenMetadata": { "type": "object", "additionalProperties": { "$ref": "#/definitions/property" } }
+  },
+  "additionalProperties": false,
+  "definitions": {
+    "type": {
+      "enum": ["string", "number", "integer", "boolean", "null", "object", "array", "any"]
+    },
+    "property": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "oneOf": [
+            { "$ref": "#/definitions/type" },
+            { "type": "array", "items": { "$ref": "#/definitions/type" } }
+          ]
+        },
+        "description": { "type": "string" },
+        "enum": { "type": "array" },
+        "minimum": { "type": "number" },
+        "maximum": { "type": "number" },
+        "required": { "type": "array", "items": { "type": "string" } },
+        "properties": { "type": "object", "additionalProperties": { "$ref": "#/definitions/property" } },
+        "additionalProperties": {
+          "oneOf": [{ "type": "boolean" }, { "$ref": "#/definitions/property" }]
+        },
+        "items": { "$ref": "#/definitions/property" }
+      },
+      "additionalProperties": false
+    }
+  }
+}

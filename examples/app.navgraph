@@ -1,0 +1,166 @@
+NAVGRAPH/2
+APP "Example Store"
+
+# Variables: name : type = default
+VAR USER_NAME : string = "Aspen"
+VAR PRODUCT_ID : string
+VAR QUANTITY : number = 1
+VAR SIGNED_IN : boolean = false
+
+# Screens: ID "Display Name"
+SCREEN home "Home"
+SCREEN shop "Shop"
+SCREEN product "Product Details"
+SCREEN reviews "Reviews"
+SCREEN cart "Cart"
+SCREEN checkout "Checkout"
+SCREEN settings "Settings"
+SCREEN notify "Notifications"
+SCREEN notify_cfg "Notification Settings"
+SCREEN account "Account"
+SCREEN privacy "Privacy"
+SCREEN profile "Profile"
+SCREEN orders "Order History"
+SCREEN order "Order Details"
+SCREEN edit "Edit Profile"
+SCREEN password "Change Password"
+
+home -> shop [cost=1] {
+  DO TAP {
+    "target": "Shop",
+    "waitFor": "screen:shop"
+  }
+}
+shop -> home [cost=1] {
+  DO TAP { "target": "Home" }
+}
+
+home -> settings [cost=1] {
+  DO TAP { "target": "Menu" }
+}
+settings -> home [cost=1] {
+  DO TAP { "target": "Home" }
+}
+
+home -> profile [cost=1] {
+  DO TAP { "target": "Profile" }
+}
+profile -> home [cost=1] {
+  DO TAP { "target": "Home" }
+}
+
+shop -> product [cost=1] {
+  DO TAP {
+    "target": "Product Card",
+    "match": { "productId": "$PRODUCT_ID$" },
+    "index": 0
+  }
+  DO WAIT {
+    "until": "screen:product",
+    "timeoutMs": 5000
+  }
+}
+product -> shop [cost=1] {
+  DO BACK {}
+}
+
+shop -> cart [cost=1] {
+  DO TAP { "target": "Cart" }
+}
+cart -> shop [cost=1] {
+  DO BACK {}
+}
+
+product -> cart [cost=1] {
+  DO TAP { "target": "Add to Cart" }
+  DO SET_STATE {
+    "key": "cart.quantity",
+    "value": "$QUANTITY$"
+  }
+}
+cart -> product [cost=1] {
+  DO TAP { "target": "Remove Item" }
+}
+
+product -> reviews [cost=1] {
+  DO TAP { "target": "Reviews" }
+}
+reviews -> product [cost=1] {
+  DO BACK {}
+}
+
+cart -> checkout [cost=1] {
+  DO TAP { "target": "Checkout" }
+  DO ASSERT {
+    "condition": "cart.notEmpty",
+    "message": "Cart must contain an item"
+  }
+}
+checkout -> cart [cost=1] {
+  DO BACK {}
+}
+
+settings -> notify [cost=1] {
+  DO TAP { "target": "Notifications" }
+}
+notify -> settings [cost=1] {
+  DO BACK {}
+}
+
+notify -> notify_cfg [cost=1] {
+  DO TAP { "target": "Settings" }
+}
+notify_cfg -> notify [cost=1] {
+  DO BACK {}
+}
+
+settings -> account [cost=1, if=SIGNED_IN] {
+  DO TAP { "target": "Account" }
+}
+account -> settings [cost=1] {
+  DO BACK {}
+}
+
+account -> privacy [cost=1] {
+  DO TAP { "target": "Privacy" }
+}
+privacy -> account [cost=1] {
+  DO BACK {}
+}
+
+profile -> orders [cost=1] {
+  DO TAP { "target": "Orders" }
+}
+orders -> profile [cost=1] {
+  DO BACK {}
+}
+
+orders -> order [cost=1] {
+  DO TAP { "target": "Order" }
+}
+order -> orders [cost=1] {
+  DO BACK {}
+}
+
+profile -> edit [cost=1] {
+  DO TAP { "target": "Edit" }
+}
+edit -> profile [cost=1] {
+  DO BACK {}
+}
+
+edit -> password [cost=1] {
+  DO TAP { "target": "Change Password" }
+}
+password -> edit [cost=1] {
+  DO BACK {}
+}
+
+# A shortcut with several ordered actions and a higher cost.
+home -> checkout [cost=5, id=quick_checkout] {
+  DO TAP { "target": "Shop" }
+  DO TAP { "target": "Cart" }
+  DO TAP { "target": "Checkout" }
+}
+
+END

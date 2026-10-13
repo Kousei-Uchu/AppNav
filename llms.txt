@@ -1,0 +1,106 @@
+# appnav
+
+> Typed navigation graphs for apps. Describe screens and directed transitions in a small `.navgraph` text format, compute a route (A*, Dijkstra, BFS), and get a plain JSON instruction tree. Works in React Native, browsers and Node. No runtime dependencies.
+
+Use appnav when you need to: model an app's screens and how to move between them, find the cheapest route between two screens, generate step by step tutorials or UI automation scripts, or enrich routes with custom data (narration, selectors, analytics). appnav never drives a UI itself.
+
+## Install and import
+
+```ts
+npm install appnav
+import * as AppNav from "appnav";                       // namespace
+import { indexTreeFromText, calculatePath, buildInstructionsSync } from "appnav";
+```
+
+## Minimal flow
+
+```ts
+const tree = indexTreeFromText(text);                     // sync: parse + validate + index
+// or: const tree = await indexTree("./app.navgraph", { readFile });   // async, file based
+const path = calculatePath(tree, "home", "cart", AppNav.ASTAR, { variables: { PRODUCT_ID: "42" } });
+const out = buildInstructionsSync(path);                  // or: await buildInstructions(path)
+```
+
+## .navgraph format
+
+```
+NAVGRAPH/2                              # header, required
+APP "Example Store"                     # optional
+VAR PRODUCT_ID : string                 # types: string number boolean null object array any
+VAR QUANTITY : number = 1               # default optional; no default means required when used
+SCREEN home "Home" [{json metadata}]
+SCREEN shop "Shop"
+home -> shop [cost=1, if=SIGNED_IN, id=my_edge, label="x"] {
+  DO TAP { "target": "Shop", "waitFor": "screen:shop" }
+  DO WAIT { "until": "screen:shop", "timeoutMs": 5000 }
+}
+shop -> home { DO BACK {} }
+END                                     # optional; nothing may follow
+```
+
+Rules:
+- Comments start with `#`. Strings and payloads are JSON. Payloads may span lines.
+- Edges are directed. Never assume a reverse edge. Cost belongs to the edge, not the action count. Default cost 1.
+- Edge ids default to `src->dst` (`#2`, `#3` for repeats) unless `id=` is given.
+- `DO TYPE {json}`: TYPE must exist in the schema. Default actions: TAP, LONG_PRESS, TYPE, SWIPE, SCROLL, BACK, WAIT, SET_STATE, ASSERT.
+- Variables in payload strings: `"$NAME$"` alone gives the native typed value; embedded gives text; `$$` is a literal `$`. Undefined variables are errors.
+- Variable precedence: graph defaults < route `variables` < `runtime`.
+- Conditions (`if=`): `&& || ! and or not == != < <= > >=`, `in`, `contains`, parentheses, dotted paths. Names resolve from variables, then the `state` option. Unknown values are falsy. No eval. Quote conditions that contain commas or brackets.
+
+## API summary
+
+Loading and validation
+- `indexTreeFromText(text, opts)` sync. `indexTree(path, { readFile, schema })` async. `parseGraph(text)` syntax only. `validateGraph(graph, schema?)` returns `{ ok, errors, warnings }`. `indexGraph(graph, opts)`.
+- Options: `schema`, `defaultCost`, `diagnostics: "throw" | "collect"`, `strictConditions`, `allowUndeclaredVariables`, `conditionOperators`.
+- React Native has no fs: use `indexTreeFromText` with bundled text, or pass `readFile`.
+- `tree.screens` (Map, authoritative), `tree.screen(id)`, `tree.outgoing(id)`, `tree.edges`, `tree.variables`, `tree.diagnostics`. `tree.<id>` shortcuts exist only for safe identifiers; type them with `indexTree<"home" | "cart">()`.
+
+Pathfinding (always synchronous)
+- `calculatePath(tree, from, to, algorithm?, options?)` throws `NoPathError`. `tryCalculatePath` returns `{ ok: true, path } | { ok: false, error }`.
+- Algorithms: `ASTAR` (default), `DIJKSTRA`, `BFS`, or a function. `registerAlgorithm(name, fn)`.
+- Options: `variables`, `runtime`, `state`, `heuristic`, `costFn`, `edgeFilter`, `conditionOperators`, `strictConditions`.
+- `findReachable(tree, start, options)`.
+
+Instructions
+- `buildInstructions(path, opts)` always async. `buildInstructionsSync(path, opts)` throws `AsyncExtensionError` if a hook returns a promise.
+- Output: `{ from, to, path, steps: [{ n, from, to, edge, cost, actions: [{ type, data, extensions }], extensions }], cost, extensions, meta }`.
+- Options: `variables`, `runtime`, `extensions`, `extensionVariables`, `onError: "throw" | "collect"`, `includeUnresolved`, `strictVariables`.
+- `isAction(action, "TAP")` narrows the payload type.
+
+Extensions (data added during generation, namespaced under `extensions[name]`)
+```ts
+const narration = defineExtension({
+  name: "narration",
+  variables: { style: "concise" },
+  run({ action, from, to, variables }) { return { text: `tap ${String(action.data.target)}` }; },
+});
+await buildInstructions(path, { extensions: [narration] });
+```
+- Hooks: `run` or `action` (per action), `step` (per transition), `route` (once). Order: actions, then step, then route.
+- Inputs are frozen. Return JSON compatible data or `undefined`. `dependsOn: ["other"]` exposes `ctx.outputs`.
+- If hooks return different shapes, give the output type: `defineExtension<"name", JsonObject>({...})`.
+
+Schemas
+- JSON `.navschema` with `extends: "default"`, `actions`, `edgeMetadata`, `screenMetadata`, `overrides`, `remove`. Load with `loadSchema(path, { readFile })` or `resolveSchema(obj)`; pass as `schema` option.
+- Redefining an inherited action differently requires listing it in `overrides`.
+
+Runtime (optional, opt in)
+- `createRuntime({ TAP: handler })`, `runtime.execute(instructions, { context })` async, `executeSync` for sync handlers. Handler options: `timeoutMs`, `retries`, `retryDelayMs`.
+
+Errors: all extend `AppNavError` with `code`, and `file`, `line`, `column`, `ids` where known. Classes: `ParseError`, `ValidationError`, `SchemaError`, `VariableError`, `ConditionError`, `NoPathError`, `ExtensionError`, `AsyncExtensionError`, `UnknownScreenError`, `ActionHandlerError`, `FileLoadError`.
+
+## Common mistakes
+
+- Using `calculatePath` result without `variables` and then hitting a required-variable error at build time. Pass `variables` to either call.
+- Expecting a reverse edge. Add `b -> a` yourself.
+- Using `buildInstructionsSync` with async hooks.
+- Calling `indexTree("file")` in React Native without `readFile`.
+- Unquoted conditions containing `,` or `]` inside `[...]`.
+- Treating the number of actions as the edge cost.
+
+## Docs
+
+- [README](./README.md): full reference, grammar, decisions on open questions
+- [Example graph](./examples/app.navgraph)
+- [Example schema](./examples/app.navschema)
+- [Schema JSON Schema](./schemas/navschema-v1.schema.json)

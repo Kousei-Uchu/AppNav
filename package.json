@@ -1,0 +1,68 @@
+{
+  "name": "appnav",
+  "version": "0.1.0",
+  "description": "Typed navigation graphs for apps: a compact .navgraph format, pathfinding, and JSON instruction generation with extension hooks. Works in React Native, browsers and Node.",
+  "keywords": [
+    "navigation",
+    "graph",
+    "pathfinding",
+    "astar",
+    "dijkstra",
+    "react-native",
+    "ui-automation",
+    "tutorial",
+    "typescript",
+    "dsl"
+  ],
+  "license": "MIT",
+  "author": "Sorren",
+  "sideEffects": false,
+  "type": "commonjs",
+  "main": "./dist/index.js",
+  "module": "./dist/index.mjs",
+  "react-native": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "react-native": "./dist/index.js",
+      "import": {
+        "types": "./dist/index.d.mts",
+        "default": "./dist/index.mjs"
+      },
+      "require": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      }
+    },
+    "./schemas/navschema-v1.schema.json": "./schemas/navschema-v1.schema.json",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "schemas",
+    "examples",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE",
+    "llms.txt",
+    "AGENTS.md",
+    "CLAUDE.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "clean": "rm -rf dist coverage",
+    "prepublishOnly": "npm run clean && npm run typecheck && npm test && npm run build"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "tsup": "^8.3.0",
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0"
+  }
+}
