@@ -64,5 +64,13 @@
     "tsup": "^8.3.0",
     "typescript": "^5.6.0",
     "vitest": "^2.1.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Kousei-Uchu/routegraph.git"
+  },
+  "homepage": "https://github.com/Kousei-Uchu/routegraph#readme",
+  "bugs": {
+    "url": "https://github.com/Kousei-Uchu/routegraph/issues"
   }
 }
