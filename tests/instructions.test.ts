@@ -30,7 +30,7 @@ describe("buildInstructions", () => {
     expect(out.cost).toBe(3);
     expect(out.steps.map((s) => s.n)).toEqual([1, 2, 3]);
     expect(out.steps[0]?.actions[0]).toEqual({ type: "TAP", data: { target: "Shop", waitFor: "screen:shop" }, extensions: {} });
-    expect(out.meta).toEqual({ app: "Example Store", algorithm: "astar", generator: "appnav" });
+    expect(out.meta).toEqual({ app: "Example Store", algorithm: "astar", generator: "routegraph" });
     expect(JSON.parse(JSON.stringify(out))).toEqual(out);
   });
 

@@ -61,7 +61,7 @@ export interface BuildOptions {
   strictVariables?: boolean;
 }
 
-export const GENERATOR_ID = "appnav";
+export const GENERATOR_ID = "routegraph";
 
 type Level = "action" | "step" | "route";
 

@@ -1,4 +1,4 @@
-# appnav
+# routegraph
 
 Typed navigation graphs for apps. Describe your screens and the transitions between them in a small text format, ask for a route, and get back a plain JSON instruction tree you can use for tutorials, UI automation, narration, analytics, or anything else.
 
@@ -9,16 +9,16 @@ Typed navigation graphs for apps. Describe your screens and the transitions betw
 - Works the same in React Native, browsers, and Node. Every entry point that can be synchronous has a synchronous form.
 - Zero runtime dependencies, dual ESM and CommonJS build, full TypeScript declarations.
 
-AppNav does not drive a UI by itself. An optional runtime is included if you want to execute instructions through handlers you register.
+routegraph does not drive a UI by itself. An optional runtime is included if you want to execute instructions through handlers you register.
 
 ## Working with AI assistants
 
-The package ships `llms.txt` (a complete cheat sheet), `AGENTS.md`, and `CLAUDE.md`. Assistants that read `node_modules/appnav` pick up the format, API, and common mistakes without further prompting. Point other tools at `node_modules/appnav/llms.txt`.
+The package ships `llms.txt` (a complete cheat sheet), `AGENTS.md`, and `CLAUDE.md`. Assistants that read `node_modules/routegraph` pick up the format, API, and common mistakes without further prompting. Point other tools at `node_modules/routegraph/llms.txt`.
 
 ## Install
 
 ```sh
-npm install appnav
+npm install routegraph
 ```
 
 Requires Node 18 or newer for tooling. The library itself uses only ES2020 features and no Node APIs, so it runs on Hermes and in browsers.
@@ -53,7 +53,7 @@ END
 ```
 
 ```ts
-import * as AppNav from "appnav";
+import * as AppNav from "routegraph";
 
 const tree = await AppNav.indexTree("./example.navgraph");
 
@@ -68,7 +68,7 @@ console.log(JSON.stringify(instructions, null, 2));
 Named imports and the namespace object both work:
 
 ```ts
-import { indexTree, calculatePath, buildInstructions, AppNav } from "appnav";
+import { indexTree, calculatePath, buildInstructions, AppNav } from "routegraph";
 ```
 
 ## React Native
@@ -78,7 +78,7 @@ React Native has no filesystem API in the JavaScript runtime, so there are two w
 **1. Bundle the text and use the synchronous API.** This is the simplest option and needs no async code at all.
 
 ```ts
-import { indexTreeFromText, calculatePath, buildInstructionsSync } from "appnav";
+import { indexTreeFromText, calculatePath, buildInstructionsSync } from "routegraph";
 import graphText from "./app.navgraph.txt"; // or a plain .ts file that exports a string
 
 const tree = indexTreeFromText(graphText);
@@ -92,7 +92,7 @@ Metro does not load `.navgraph` files out of the box. Either export the text fro
 
 ```ts
 import * as FileSystem from "expo-file-system";
-import { indexTree } from "appnav";
+import { indexTree } from "routegraph";
 
 const tree = await indexTree(`${FileSystem.documentDirectory}app.navgraph`, {
   readFile: (p) => FileSystem.readAsStringAsync(p),
@@ -248,7 +248,7 @@ Inheritance rules:
 - Removing an inherited action requires listing it in `remove`.
 - `extends` can be `"default"`, the name of a schema registered with `registerSchema`, or (with `loadSchema`) a file path.
 
-Property definitions support `type` (including `integer`, and arrays of types), `enum`, `minimum`, `maximum`, `required`, `properties`, `additionalProperties`, and `items`. Unknown properties are allowed by default so payloads can carry extra data. Set `"additionalProperties": false` to forbid them. A JSON Schema for editor support is shipped at `appnav/schemas/navschema-v1.schema.json`.
+Property definitions support `type` (including `integer`, and arrays of types), `enum`, `minimum`, `maximum`, `required`, `properties`, `additionalProperties`, and `items`. Unknown properties are allowed by default so payloads can carry extra data. Set `"additionalProperties": false` to forbid them. A JSON Schema for editor support is shipped at `routegraph/schemas/navschema-v1.schema.json`.
 
 A schema describes what is valid. It does not implement anything. Declaring `SCAN_QR` does not give you a camera.
 
@@ -316,7 +316,7 @@ Notes:
   ],
   "cost": 3,
   "extensions": {},
-  "meta": { "app": "Example Store", "algorithm": "astar", "generator": "appnav" }
+  "meta": { "app": "Example Store", "algorithm": "astar", "generator": "routegraph" }
 }
 ```
 
@@ -340,7 +340,7 @@ if (isAction<MyActions, "SCAN_QR">(action, "SCAN_QR")) action.data.camera;
 Extensions add data while instructions are generated. Their output lands under `extensions[<name>]` so extensions cannot overwrite each other or the core data.
 
 ```ts
-import { defineExtension, buildInstructions, getExtensionOutput } from "appnav";
+import { defineExtension, buildInstructions, getExtensionOutput } from "routegraph";
 
 const narration = defineExtension({
   name: "narration",
@@ -382,10 +382,10 @@ Typing note: `defineExtension` infers the output type from what your hooks retur
 
 ## Runtime (optional)
 
-Core AppNav never executes anything. If you want to run instructions, register handlers explicitly:
+Core routegraph never executes anything. If you want to run instructions, register handlers explicitly:
 
 ```ts
-import { createRuntime } from "appnav";
+import { createRuntime } from "routegraph";
 
 const runtime = createRuntime<{ driver: MyDriver }>({
   TAP: ({ action, context }) => context.driver.tap(String(action.data.target)),

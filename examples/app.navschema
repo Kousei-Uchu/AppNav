@@ -1,5 +1,5 @@
 {
-  "$schema": "https://appnav.dev/schema/v1",
+  "$schema": "https://routegraph.dev/schema/v1",
   "schemaVersion": 1,
   "name": "example-store",
   "extends": "default",

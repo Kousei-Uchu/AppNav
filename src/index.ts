@@ -106,6 +106,6 @@ export {
 } from "./runtime";
 
 import * as AppNavNamespace from "./api-namespace";
-/** Namespace object for `import { AppNav } from "appnav"`. */
+/** Namespace object for `import { AppNav } from "routegraph"`. */
 export const AppNav = AppNavNamespace;
 export const VERSION = "0.1.0";

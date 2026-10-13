@@ -1,15 +1,15 @@
-# appnav
+# routegraph
 
 > Typed navigation graphs for apps. Describe screens and directed transitions in a small `.navgraph` text format, compute a route (A*, Dijkstra, BFS), and get a plain JSON instruction tree. Works in React Native, browsers and Node. No runtime dependencies.
 
-Use appnav when you need to: model an app's screens and how to move between them, find the cheapest route between two screens, generate step by step tutorials or UI automation scripts, or enrich routes with custom data (narration, selectors, analytics). appnav never drives a UI itself.
+Use routegraph when you need to: model an app's screens and how to move between them, find the cheapest route between two screens, generate step by step tutorials or UI automation scripts, or enrich routes with custom data (narration, selectors, analytics). routegraph never drives a UI itself.
 
 ## Install and import
 
 ```ts
-npm install appnav
-import * as AppNav from "appnav";                       // namespace
-import { indexTreeFromText, calculatePath, buildInstructionsSync } from "appnav";
+npm install routegraph
+import * as AppNav from "routegraph";                       // namespace
+import { indexTreeFromText, calculatePath, buildInstructionsSync } from "routegraph";
 ```
 
 ## Minimal flow

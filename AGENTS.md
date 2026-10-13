@@ -1,10 +1,10 @@
 # AGENTS.md
 
-Guidance for AI coding agents. Part 1 is for projects that use appnav. Part 2 is for working on the appnav repository itself.
+Guidance for AI coding agents. Part 1 is for projects that use routegraph. Part 2 is for working on the routegraph repository itself.
 
-## Part 1: Using appnav in a project
+## Part 1: Using routegraph in a project
 
-appnav models an app as a directed graph of screens (`.navgraph` text), finds routes, and emits JSON instructions. Read `llms.txt` in this package for the full cheat sheet, and `README.md` for the reference.
+routegraph models an app as a directed graph of screens (`.navgraph` text), finds routes, and emits JSON instructions. Read `llms.txt` in this package for the full cheat sheet, and `README.md` for the reference.
 
 Checklist when generating or editing a `.navgraph`:
 1. Start with `NAVGRAPH/2`. Declare every `VAR` that a `$NAME$` reference uses.

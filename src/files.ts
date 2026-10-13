@@ -21,7 +21,7 @@ async function importFs(): Promise<FsPromises | undefined> {
     return typeof mod.readFile === "function" ? mod : mod.default;
   } catch (error) {
     if (typeof process !== "undefined" && (process as { env?: Record<string, string | undefined> }).env?.APPNAV_DEBUG) {
-      console.error("appnav: dynamic import of node:fs/promises failed", error);
+      console.error("routegraph: dynamic import of node:fs/promises failed", error);
     }
     return undefined;
   }
