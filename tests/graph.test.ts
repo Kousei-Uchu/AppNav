@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   NavigationTree,
   ValidationError,
@@ -118,11 +118,22 @@ describe("indexing", () => {
   });
 
   it("explains how to supply a reader when there is no filesystem", async () => {
+    // Simulate React Native: a global `process` with no Node version information.
+    vi.stubGlobal("process", { env: {} });
+    try {
+      await expect(indexTree("x.navgraph")).rejects.toThrow(/readFile/);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("still reads files when process.getBuiltinModule is missing (Node 18, early Node 20)", async () => {
     const proc = (globalThis as { process: { getBuiltinModule?: unknown } }).process;
     const saved = proc.getBuiltinModule;
     proc.getBuiltinModule = undefined;
     try {
-      await expect(indexTree("x.navgraph")).rejects.toThrow(/readFile/);
+      const t = await indexTree(examplePath("app.navgraph"));
+      expect(t.screens.size).toBeGreaterThan(0);
     } finally {
       proc.getBuiltinModule = saved;
     }
