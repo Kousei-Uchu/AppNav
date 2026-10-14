@@ -90,8 +90,11 @@ Runtime (optional, opt in)
 Errors: all extend `AppNavError` with `code`, and `file`, `line`, `column`, `ids` where known. Classes: `ParseError`, `ValidationError`, `SchemaError`, `VariableError`, `ConditionError`, `NoPathError`, `ExtensionError`, `AsyncExtensionError`, `UnknownScreenError`, `ActionHandlerError`, `FileLoadError`.
 
 ## Dynamic registration
-- `registerScreens(tree, input, template?)`, `addEdges`, `addActions`, `cloneTree`. Return new trees; source trees are never mutated.
-- Template copies clone incident edges when `cloneEdges` is true.
+- Registration changes a live tree in place and returns it. Flags added items `dynamic: true`. One shared tree: `setDefaultTree(tree)` or `indexTreeFromText(text, { setAsDefault: true })`.
+- `registerScreens([tree,] ids, template?)` clones the template screen as `template:id` and copies the edges touching it. `registerEdges([tree,] edges)`, `registerActions([tree,] screenId, actions)`. Also methods on the tree and snake_case aliases (`register_screens`).
+- Remove with `unregisterScreens(idOrIdsOrTemplate)`, `unregisterEdges(ids)`, `clearDynamic()`. File screens and edges cannot be removed.
+- `createTree()` makes an empty tree. `cloneTree(tree)` makes an independent copy.
+- A failed registration changes nothing. A Path made before a removal throws when built.
 
 ## Common mistakes:
 

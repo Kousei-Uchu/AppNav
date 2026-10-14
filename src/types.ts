@@ -55,6 +55,10 @@ export interface Screen {
   readonly meta: JsonObject;
   /** Declaration order, used for deterministic tie breaking. */
   readonly index: number;
+  /** True for screens added at runtime with `registerScreens` or `registerActions`. */
+  readonly dynamic?: boolean;
+  /** Id of the screen this one was cloned from, when registered from a template. */
+  readonly template?: string;
 }
 
 export interface ActionDeclaration {
@@ -87,6 +91,8 @@ export interface Edge {
   readonly meta: JsonObject;
   /** Declaration order, used for deterministic tie breaking. */
   readonly index: number;
+  /** True for edges added at runtime. */
+  readonly dynamic?: boolean;
   readonly line?: number;
   readonly column?: number;
 }

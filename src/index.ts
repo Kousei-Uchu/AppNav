@@ -104,6 +104,7 @@ export {
   type HandlerContext,
   type HandlerOptions,
 } from "./runtime";
+export { getDefaultTree, setDefaultTree } from "./default-tree";
 export * from "./dynamic";
 
 import * as AppNavNamespace from "./api-namespace";

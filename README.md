@@ -426,25 +426,44 @@ The design document left a number of questions open. These are the choices this 
 
 ## Dynamic registration
 
-Screens, edges, and actions can be added at runtime, producing a new tree. This is useful when a list of products or cart lines only exists at runtime.
+Screens, edges, and actions can be added while the app runs. This is useful when a list of products or cart lines only exists at runtime. Registration changes a live tree in place, so every part of your app that holds the tree sees the change immediately. There are no tree versions to keep in sync.
+
+Set one shared tree at startup and register from anywhere:
 
 ```ts
-import { registerScreens, addEdges, cloneTree } from "routegraph";
+import { indexTreeFromText, setDefaultTree, registerScreens, registerEdges } from "routegraph";
 
-const tree = indexTreeFromText(text);
+const tree = indexTreeFromText(text, { setAsDefault: true }); // same as setDefaultTree(tree)
 
-// Clone the `item_settings` screen once per product id.
-const withSettings = registerScreens(tree, ["product_1", "product_2"], "item_settings");
+// Clone the `item_settings` screen once per product id. Creates `item_settings:product_1` and so on.
+registerScreens(["product_1", "product_2"], "item_settings");
 
-// Add an explicit transition carrying a runtime action.
-const ready = addEdges(withSettings, {
-  from: "cart",
-  to: "cart",
-  actions: [{ type: "REMOVE_ITEM", data: { target: "product_1" } }],
-});
+// Add an explicit transition.
+registerEdges([{ from: "cart", to: "cart", actions: [{ type: "TAP", data: { target: "Clear" } }] }]);
 ```
 
-Instance methods (`tree.registerScreens(...)`) and snake-case aliases (`register_screens`) also exist. `cloneTree` forks a tree so the original stays untouched.
+Every registration function also accepts a tree as its first argument (`registerScreens(tree, ids, "item_settings")`), and the same calls exist as methods (`tree.registerScreens(ids, "item_settings")`) and in snake case (`register_screens`). Without a tree argument and without a default tree, the call throws an error that says how to set one. All of them return the tree they changed, so calls can be chained.
+
+How it behaves:
+
+- A registered screen or edge is flagged `dynamic: true`. A screen made from a template also records `template`.
+- Registration is all or nothing. If any part of a call fails, the tree is left exactly as it was.
+- Edge ids are deterministic: `from->to`, then `from->to#2`, `#3`.
+- A `Path` holds screen ids, not copies. If you unregister a screen that a path uses, `buildInstructions` for that path throws. Recalculate after changing the tree.
+
+Removing what you added:
+
+```ts
+import { unregisterScreens, unregisterEdges, clearDynamic } from "routegraph";
+
+unregisterScreens("item_settings:product_1");        // one screen and every edge touching it
+unregisterScreens({ template: "item_settings" });   // every instance of a template
+clearDynamic();                                     // everything added at runtime
+```
+
+Screens and edges that came from the graph file cannot be removed this way, and the call throws if you try. Unknown ids are ignored, so a refresh can call `clearDynamic()` and register again safely.
+
+`createTree({ app, schema, setAsDefault })` makes an empty tree to register into. `cloneTree(tree)` makes an independent deep copy, which is the way to experiment on a local copy without touching the shared tree.
 
 Static action nodes are supported too, both in files and at runtime:
 
@@ -454,7 +473,7 @@ cart -> remove_item { DO TAP { "target": "Item row" } }
 remove_item -> cart { DO SWIPE { "direction": "left" } }
 ```
 
-`registerActions` / `addActions` create these action nodes and the surrounding transitions automatically.
+`registerActions(screen, actions)` creates an action node and the surrounding transitions automatically.
 
 ## Automatic mapping (optional)
 

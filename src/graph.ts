@@ -6,6 +6,7 @@ import {
   type ConditionOperator,
 } from "./conditions";
 import { AppNavError, UnknownScreenError, ValidationError } from "./errors";
+import { setDefaultTree } from "./default-tree";
 import { defaultReadFile } from "./files";
 import { deepFreeze, setOwn } from "./json";
 import { parseGraph, type ParseOptions } from "./parser";
@@ -176,6 +177,8 @@ export interface IndexOptions extends ParseOptions, ValidateOptions {
   defaultCost?: number;
   /** "throw" (default) raises ValidationError. "collect" keeps going and records tree.diagnostics. */
   diagnostics?: "throw" | "collect";
+  /** Make the new tree the shared default used by registration functions. Default false. */
+  setAsDefault?: boolean;
 }
 
 export interface IndexFileOptions extends Omit<IndexOptions, "schema"> {
@@ -185,7 +188,16 @@ export interface IndexFileOptions extends Omit<IndexOptions, "schema"> {
   readFile?: ReadFile;
 }
 
-/** Methods and data shared by every tree. */
+const SAFE_ID = /^[A-Za-z_$][\w$]*$/;
+
+/**
+ * Methods and data shared by every tree.
+ *
+ * A tree loaded from a file is fixed, but trees are live objects: screens and
+ * edges registered at runtime (see `registerScreens`) are added in place and
+ * flagged `dynamic`. Screens and edges that came from the file are never
+ * removed by the dynamic API.
+ */
 export class NavigationTree {
   readonly app?: string;
   readonly version: number;
@@ -195,8 +207,10 @@ export class NavigationTree {
   readonly screens: ReadonlyMap<string, Screen>;
   readonly edges: readonly Edge[];
   readonly diagnostics: readonly Diagnostic[];
-  private readonly adjacency: ReadonlyMap<string, readonly Edge[]>;
-  private readonly reverse: ReadonlyMap<string, readonly Edge[]>;
+  private readonly adjacency: Map<string, Edge[]>;
+  private readonly reverse: Map<string, Edge[]>;
+  private screenCounter = 0;
+  private edgeCounter = 0;
 
   constructor(parts: {
     app?: string;
@@ -215,19 +229,27 @@ export class NavigationTree {
     this.variables = parts.variables;
     this.screens = parts.screens;
     this.edges = parts.edges;
-    this.diagnostics = parts.diagnostics;
-    const adj = new Map<string, Edge[]>();
-    const rev = new Map<string, Edge[]>();
-    for (const id of parts.screens.keys()) {
-      adj.set(id, []);
-      rev.set(id, []);
+    this.diagnostics = [...parts.diagnostics];
+    this.adjacency = new Map();
+    this.reverse = new Map();
+    for (const s of parts.screens.values()) {
+      this.adjacency.set(s.id, []);
+      this.reverse.set(s.id, []);
+      this.screenCounter = Math.max(this.screenCounter, s.index + 1);
     }
     for (const e of parts.edges) {
-      adj.get(e.from)?.push(e);
-      rev.get(e.to)?.push(e);
+      this.adjacency.get(e.from)?.push(e);
+      this.reverse.get(e.to)?.push(e);
+      this.edgeCounter = Math.max(this.edgeCounter, e.index + 1);
     }
-    this.adjacency = adj;
-    this.reverse = rev;
+    for (const s of parts.screens.values()) this.defineShortcut(s);
+  }
+
+  /** `tree.<id>` shortcut for ids that are safe identifiers and do not collide with members. */
+  private defineShortcut(screen: Screen): void {
+    if (SAFE_ID.test(screen.id) && !(screen.id in this)) {
+      Object.defineProperty(this, screen.id, { value: screen, enumerable: false, writable: false, configurable: true });
+    }
   }
 
   /** Authoritative lookup. Throws UnknownScreenError when missing. */
@@ -266,6 +288,66 @@ export class NavigationTree {
       }),
     ) as JsonObject;
   }
+
+  // -- Internal mutation primitives. The dynamic registration API is the public way to use these.
+
+  /** @internal Next free declaration index for a screen. */
+  _nextScreenIndex(): number {
+    return this.screenCounter;
+  }
+
+  /** @internal Next free declaration index for an edge. */
+  _nextEdgeIndex(): number {
+    return this.edgeCounter;
+  }
+
+  /** @internal Add a screen and maintain adjacency and the `tree.<id>` shortcut. */
+  _addScreen(screen: Screen): void {
+    (this.screens as Map<string, Screen>).set(screen.id, screen);
+    this.adjacency.set(screen.id, []);
+    this.reverse.set(screen.id, []);
+    this.screenCounter = Math.max(this.screenCounter, screen.index + 1);
+    this.defineShortcut(screen);
+  }
+
+  /** @internal Add an edge. Both endpoints must already exist. */
+  _addEdge(edge: Edge): void {
+    (this.edges as Edge[]).push(edge);
+    this.adjacency.get(edge.from)?.push(edge);
+    this.reverse.get(edge.to)?.push(edge);
+    this.edgeCounter = Math.max(this.edgeCounter, edge.index + 1);
+  }
+
+  /** @internal Remove every edge matching the predicate. Returns the removed edges. */
+  _removeEdges(match: (edge: Edge) => boolean): Edge[] {
+    const all = this.edges as Edge[];
+    const removed = all.filter(match);
+    if (removed.length === 0) return removed;
+    const gone = new Set(removed);
+    for (let i = all.length - 1; i >= 0; i--) if (gone.has(all[i] as Edge)) all.splice(i, 1);
+    for (const list of [...this.adjacency.values(), ...this.reverse.values()]) {
+      for (let i = list.length - 1; i >= 0; i--) if (gone.has(list[i] as Edge)) list.splice(i, 1);
+    }
+    return removed;
+  }
+
+  /** @internal Remove a screen, its edges and its shortcut. Returns the removed edges. */
+  _removeScreen(id: string): Edge[] {
+    const screen = this.screens.get(id);
+    if (!screen) return [];
+    const removed = this._removeEdges((e) => e.from === id || e.to === id);
+    (this.screens as Map<string, Screen>).delete(id);
+    this.adjacency.delete(id);
+    this.reverse.delete(id);
+    const desc = Object.getOwnPropertyDescriptor(this, id);
+    if (desc && desc.value === screen) delete (this as unknown as Record<string, unknown>)[id];
+    return removed;
+  }
+
+  /** @internal Append diagnostics produced by dynamic registration. */
+  _addDiagnostics(items: readonly Diagnostic[]): void {
+    (this.diagnostics as Diagnostic[]).push(...items);
+  }
 }
 
 type Reserved = keyof NavigationTree;
@@ -279,8 +361,6 @@ export type NavTree<Id extends string = string> = NavigationTree &
   (string extends Id
     ? unknown
     : { readonly [K in Exclude<Id, Reserved | "constructor" | "__proto__">]: Screen });
-
-const SAFE_ID = /^[A-Za-z_$][\w$]*$/;
 
 export function indexGraph<Id extends string = string>(graph: Graph, options: IndexOptions = {}): NavTree<Id> {
   const schema = toResolvedSchema(options.schema);
@@ -340,7 +420,7 @@ export function indexGraph<Id extends string = string>(graph: Graph, options: In
 
   deepFreeze(variables);
   deepFreeze([...screens.values()]);
-  deepFreeze(edges);
+  for (const e of edges) deepFreeze(e);
 
   const tree = new NavigationTree({
     app: graph.app,
@@ -352,11 +432,7 @@ export function indexGraph<Id extends string = string>(graph: Graph, options: In
     edges,
     diagnostics: result.diagnostics,
   });
-  for (const [id, screen] of screens) {
-    if (SAFE_ID.test(id) && !(id in tree)) {
-      Object.defineProperty(tree, id, { value: screen, enumerable: false, writable: false, configurable: false });
-    }
-  }
+  if (options.setAsDefault) setDefaultTree(tree);
   return tree as NavTree<Id>;
 }
 

@@ -16,8 +16,10 @@ Checklist when generating or editing a `.navgraph`:
 7. Validate with `validateGraph(parseGraph(text))` or `indexTreeFromText(text, { diagnostics: "collect" })` and read `diagnostics` (each has code, line, column).
 
 Checklist when writing code against the API (dynamic graphs):
-- Dynamic registration (`registerScreens`, `addEdges`, `addActions`, `cloneTree`) returns a new tree. The source tree is never mutated.
-- Template copies clone incident edges when `cloneEdges` is true.
+- Dynamic registration (`registerScreens`, `registerEdges`, `registerActions`) changes the tree in place and returns the same tree. Use `cloneTree` for an independent copy.
+- Without a tree argument, registration uses the shared tree set by `setDefaultTree` or `setAsDefault: true`.
+- Added items are flagged `dynamic`. Remove them with `unregisterScreens`, `unregisterEdges` or `clearDynamic`. File items cannot be removed.
+- Template copies clone incident edges when `cloneEdges` is true. A registration call is all or nothing.
 
 Checklist when writing code against the API:
 - Routes are synchronous. Instruction building is async by default (`buildInstructions`) with a sync twin (`buildInstructionsSync`).
