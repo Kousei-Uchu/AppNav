@@ -511,6 +511,21 @@ How it behaves:
 - Edge ids are deterministic: `from->to`, then `from->to#2`, `#3`.
 - A `Path` holds screen ids, not copies. If you unregister a screen that a path uses, `buildInstructions` for that path throws. Recalculate after changing the tree.
 
+Per item params. Template copies are not identical: each one carries params that fill `$NAME$` references on the edges that touch it. Write the template edges once, declare the variable, and register the ids:
+
+```ts
+// graph file:  VAR ITEM_ID : string
+//              cart -> item_settings { DO TAP { "target": "Item card", "match": { "itemId": "$ITEM_ID$" } } }
+registerScreens(["product_1", { id: "product_2", params: { ITEM_ID: "SKU-2" } }], "item_settings");
+// item_settings:product_1 taps the card with itemId "product_1" (the default)
+// item_settings:product_2 taps the card with itemId "SKU-2"
+```
+
+- `ITEM_ID` defaults to the part of the id after the template prefix, when the tree declares a variable called `ITEM_ID`. Any other param is explicit: `{ id, params: { NAME: value } }`.
+- Params are stored on the screen (`screen.params`). They are applied when instructions are built, to every edge that touches the screen, so the cloned edges keep their `$NAME$` templates.
+- Precedence, lowest to highest: graph defaults, screen params, route `variables`, `runtime` values.
+- Every param name must be a declared variable (`UNKNOWN_PARAM`) and its value must fit the declared type (`PARAM_TYPE`). A template that references `$ITEM_ID$` without declaring it is reported as an undeclared variable when it is loaded or cloned. A required variable with no default, no param and no route value fails at build time with the variable's name.
+
 Removing what you added:
 
 ```ts

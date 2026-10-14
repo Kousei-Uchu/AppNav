@@ -59,6 +59,11 @@ export interface Screen {
   readonly dynamic?: boolean;
   /** Id of the screen this one was cloned from, when registered from a template. */
   readonly template?: string;
+  /**
+   * Per item values for `$NAME$` references on the edges that touch this screen.
+   * They sit above graph defaults and below route variables.
+   */
+  readonly params?: JsonObject;
 }
 
 export interface ActionDeclaration {

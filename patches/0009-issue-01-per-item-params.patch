@@ -1,0 +1,393 @@
+From 069bc2ee75728cd02ae7d80c6661dbd0dabcbed7 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 14 Oct 2026 02:57:39 +0000
+Subject: [PATCH] Make template copies per item with screen params (issue 1)
+
+registerScreens(["product_1", "product_2"], "item_settings") made copies
+that produced identical instructions, so nothing item specific reached
+the output.
+
+- ScreenSpec gains `params`; they are stored on the Screen and resolved
+  when instructions are built for every edge touching the screen, so
+  template edges are written once with $NAME$ references.
+- ITEM_ID defaults to the id after the template prefix when declared.
+- Precedence: graph defaults < screen params < route variables < runtime.
+- Params must be declared variables of the right type (UNKNOWN_PARAM,
+  PARAM_TYPE); a bad one rejects the whole call.
+- cloneTree copies params. Tests, README, llms.txt, AGENTS.md, CHANGELOG.
+---
+ AGENTS.md            |  1 +
+ CHANGELOG.md         |  1 +
+ README.md            | 15 +++++++
+ llms.txt             |  1 +
+ src/dynamic.ts       | 53 ++++++++++++++++++++++--
+ src/instructions.ts  | 20 +++++++++
+ src/types.ts         |  5 +++
+ src/variables.ts     |  5 ++-
+ tests/params.test.ts | 99 ++++++++++++++++++++++++++++++++++++++++++++
+ 9 files changed, 196 insertions(+), 4 deletions(-)
+ create mode 100644 tests/params.test.ts
+
+diff --git a/AGENTS.md b/AGENTS.md
+index 219d1cf..d9ec19c 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -27,6 +27,7 @@ Checklist when writing code against the API (dynamic graphs):
+ - Registered actions accept `repeat` (a whole number >= 1, or a `$VAR$` the route supplies). It appears on the instruction action as `repeat`.
+ - Recovery is the app's job: the app passes the current screen and the goal to `calculatePath`, once per leg (see `examples/recover-extra-quantity.ts`). Do not look for position tracking or off-track detection in routegraph.
+ - Action nodes perform their actions on the edge into the node (`cart -> remove_item`). The edge back is empty and free. Write `ACTION` nodes in files the same way.
++- Template copies differ through params: declare `VAR ITEM_ID : string`, use `$ITEM_ID$` on template edges, register `{ id, params }`. Do not hand-edit cloned edges. Params rank below route `variables`.
+ - Template copies clone incident edges when `cloneEdges` is true. A registration call is all or nothing.
+ 
+ Checklist when writing code against the API:
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 0ac2505..c9dd067 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -22,6 +22,7 @@ Keep a Changelog and the project follows semantic versioning.
+ - `unregisterScreens` and `unregisterEdges` throw `INVALID_REGISTRATION` for a selector that is not an id, an array of ids, or (screens only) `{ template }`.
+ - Moved the source scanner and the `NavGraphWatcher` component out of the core package into `packages/devtools`, a separate private package. The scanner had stray shell lines at the end of the file and did not parse; fixed. Its unused `--graph` option is gone. The README no longer claims a CLI merge step or a diff, since neither existed. The `scan` npm script is removed.
+ - Added a worked example, `examples/recover-extra-quantity.ts`, with a README section and a test that runs it: route to an action node with a variable `repeat`, then back to the tutorial step, with the app doing its own re-plan.
++- Template copies are now per item. `registerScreens(ids, template)` accepts `{ id, params }`, stores `params` on the screen, and resolves them when instructions are built (graph defaults < screen params < route variables < runtime). `ITEM_ID` defaults to the part of the id after the template prefix when the tree declares it. Unknown or mistyped params are rejected (`UNKNOWN_PARAM`, `PARAM_TYPE`). Before, every copy produced identical instructions.
+ - Removed the `MutableGraphData` type. The no-tree form of `register_screens` no longer builds an empty tree, and now uses the default tree.
+ 
+ ## 0.1.0
+diff --git a/README.md b/README.md
+index 72f44a6..1a89278 100644
+--- a/README.md
++++ b/README.md
+@@ -511,6 +511,21 @@ How it behaves:
+ - Edge ids are deterministic: `from->to`, then `from->to#2`, `#3`.
+ - A `Path` holds screen ids, not copies. If you unregister a screen that a path uses, `buildInstructions` for that path throws. Recalculate after changing the tree.
+ 
++Per item params. Template copies are not identical: each one carries params that fill `$NAME$` references on the edges that touch it. Write the template edges once, declare the variable, and register the ids:
++
++```ts
++// graph file:  VAR ITEM_ID : string
++//              cart -> item_settings { DO TAP { "target": "Item card", "match": { "itemId": "$ITEM_ID$" } } }
++registerScreens(["product_1", { id: "product_2", params: { ITEM_ID: "SKU-2" } }], "item_settings");
++// item_settings:product_1 taps the card with itemId "product_1" (the default)
++// item_settings:product_2 taps the card with itemId "SKU-2"
++```
++
++- `ITEM_ID` defaults to the part of the id after the template prefix, when the tree declares a variable called `ITEM_ID`. Any other param is explicit: `{ id, params: { NAME: value } }`.
++- Params are stored on the screen (`screen.params`). They are applied when instructions are built, to every edge that touches the screen, so the cloned edges keep their `$NAME$` templates.
++- Precedence, lowest to highest: graph defaults, screen params, route `variables`, `runtime` values.
++- Every param name must be a declared variable (`UNKNOWN_PARAM`) and its value must fit the declared type (`PARAM_TYPE`). A template that references `$ITEM_ID$` without declaring it is reported as an undeclared variable when it is loaded or cloned. A required variable with no default, no param and no route value fails at build time with the variable's name.
++
+ Removing what you added:
+ 
+ ```ts
+diff --git a/llms.txt b/llms.txt
+index 386a486..a615779 100644
+--- a/llms.txt
++++ b/llms.txt
+@@ -94,6 +94,7 @@ Errors: all extend `AppNavError` with `code`, and `file`, `line`, `column`, `ids
+ ## Dynamic registration
+ - Registration changes a live tree in place and returns it. Flags added items `dynamic: true`. One shared tree: `setDefaultTree(tree)` or `indexTreeFromText(text, { setAsDefault: true })`.
+ - `registerScreens([tree,] ids, template?)` clones the template screen as `template:id` and copies the edges touching it. `registerEdges([tree,] edges)`, `registerActions([tree,] screenId, { name: { actions: [...], to?, cost? } })` (every action must be named; the name is the node id; an action may carry `repeat`). The actions run on the edge into the node, so a route to the node ends with the action; the edge out is empty and costs 0. Inputs are typed: screens are an array of ids or `{ id, name?, meta?, template?, cloneEdges? }`, edges an array of `{ from, to, id?, cost?, condition?, meta?, actions? }`; other shapes and unknown keys fail with `INVALID_REGISTRATION`. Each function is also a method on the tree and has one snake_case twin (`register_screens`, `register_edges`, `register_actions`, `unregister_screens`, `unregister_edges`, `clear_dynamic`, `clone_tree`). `augmentTree([tree,] { template?, screens?, edges? })` does both in one call. There are no other aliases (no `addScreens`, `registerScreen`, `copyTree`).
++- Per item params: declare `VAR ITEM_ID : string`, write `$ITEM_ID$` on the template edges once, and `registerScreens(["p1", { id: "p2", params: { ITEM_ID: "SKU-2" } }], "tpl")`. `ITEM_ID` defaults to the id after `tpl:`. Params live on `screen.params` and are resolved at build time: graph defaults < params < route variables < runtime. Names must be declared (`UNKNOWN_PARAM`), types must fit (`PARAM_TYPE`).
+ - Remove with `unregisterScreens(idOrIdsOrTemplate)`, `unregisterEdges(ids)`, `clearDynamic()`. File screens and edges cannot be removed.
+ - Existing ids are an error by default. `{ onDuplicate: "skip" | "replace" }` changes that (dynamic items only).
+ - Recovery: the app decides when to re-plan and calls `calculatePath(tree, currentScreen, goal)` per leg, then `buildInstructionsSync` for each. routegraph does not track position. Worked example: `examples/recover-extra-quantity.ts`.
+diff --git a/src/dynamic.ts b/src/dynamic.ts
+index 0b73616..a8e294a 100644
+--- a/src/dynamic.ts
++++ b/src/dynamic.ts
+@@ -10,6 +10,7 @@ import {
+   type ValidateOptions,
+ } from "./graph";
+ import { cloneJson, deepFreeze, isPlainObject } from "./json";
++import { matchesType, typeOfValue } from "./variables";
+ import type { ResolvedSchema, SchemaDefinition } from "./schema";
+ import type { ActionDeclaration, Diagnostic, Edge, JsonObject, Screen, VariableDeclaration } from "./types";
+ 
+@@ -37,6 +38,13 @@ export interface ScreenSpec {
+   template?: string;
+   /** Copy edges incident to the template screen. Default true. */
+   cloneEdges?: boolean;
++  /**
++   * Per item values for the `$NAME$` references on this screen's edges, for
++   * example `{ ITEM_ID: "product_1" }`. Every name must be a declared variable
++   * and its value must fit the declared type. `ITEM_ID` defaults to the part of
++   * the id after the template prefix when the tree declares a variable of that name.
++   */
++  params?: JsonObject;
+ }
+ 
+ /** A screen to register: a bare id, or an object when it needs a name, metadata or its own template. */
+@@ -242,7 +250,7 @@ function cloneActions(actions: readonly ActionDeclaration[]): ActionDeclaration[
+ // JavaScript callers who pass anything else get an INVALID_REGISTRATION
+ // diagnostic that shows the right call, instead of items quietly dropped.
+ 
+-const SCREEN_KEYS = new Set(["id", "name", "meta", "template", "cloneEdges"]);
++const SCREEN_KEYS = new Set(["id", "name", "meta", "template", "cloneEdges", "params"]);
+ const EDGE_KEYS = new Set(["from", "to", "id", "cost", "condition", "meta", "actions"]);
+ const PATCH_KEYS = new Set(["template", "screens", "edges"]);
+ 
+@@ -268,7 +276,12 @@ function screenSpecs(st: Stage, input: unknown): ScreenSpec[] {
+   input.forEach((item: unknown, i) => {
+     if (typeof item === "string") out.push({ id: item });
+     else if (isPlainObject(item) && typeof item.id === "string") {
+-      if (!unknownKeys(st, "option", item, SCREEN_KEYS, `Screen "${item.id}"`)) out.push(item as unknown as ScreenSpec);
++      if (unknownKeys(st, "option", item, SCREEN_KEYS, `Screen "${item.id}"`)) return;
++      if (item.params !== undefined && !isPlainObject(item.params)) {
++        problem(st, "INVALID_REGISTRATION", `Screen "${item.id}": "params" must be an object such as { ITEM_ID: "${item.id}" }`, [item.id]);
++        return;
++      }
++      out.push(item as unknown as ScreenSpec);
+     } else {
+       problem(st, "INVALID_REGISTRATION", `Screen ${i} must be an id string or an object with a string "id". Use ${USAGE.screens}`, []);
+     }
+@@ -295,6 +308,36 @@ function edgeSpecs(st: Stage, input: unknown): EdgeSpec[] {
+ // ---------------------------------------------------------------------------
+ // Staging
+ 
++/** The part of a template instance id after the template prefix, used as the default ITEM_ID. */
++function itemIdOf(id: string, template: string | undefined): string | undefined {
++  if (template && id.startsWith(`${template}:`)) return id.slice(template.length + 1);
++  return undefined;
++}
++
++/**
++ * Work out and check a screen's params: explicit ones plus the ITEM_ID default.
++ * Returns undefined (after reporting) when a param is not a declared variable or has the wrong type.
++ */
++function screenParams(st: Stage, spec: ScreenSpec, template: string | undefined, id: string): JsonObject | undefined {
++  const declared = st.tree.variables;
++  const params: JsonObject = {};
++  const itemId = itemIdOf(id, template);
++  if (itemId !== undefined && declared.ITEM_ID) params.ITEM_ID = itemId;
++  for (const [name, value] of Object.entries(spec.params ?? {})) params[name] = cloneJson(value);
++  let ok = true;
++  for (const [name, value] of Object.entries(params)) {
++    const decl = declared[name];
++    if (!decl) {
++      problem(st, "UNKNOWN_PARAM", `Screen "${id}": param "${name}" is not a declared variable. Declare it with VAR ${name} : <type>`, [id, name]);
++      ok = false;
++    } else if (!matchesType(value, decl.type)) {
++      problem(st, "PARAM_TYPE", `Screen "${id}": param "${name}" must be ${decl.type}, got ${typeOfValue(value)}`, [id, name]);
++      ok = false;
++    }
++  }
++  return ok ? params : undefined;
++}
++
+ function stageScreens(st: Stage, input: unknown, defaultTemplate: string | undefined, options: RegisterOptions): void {
+   for (const spec of screenSpecs(st, input)) {
+     const tpl = spec.template ?? defaultTemplate;
+@@ -307,6 +350,9 @@ function stageScreens(st: Stage, input: unknown, defaultTemplate: string | undef
+       continue;
+     }
+ 
++    const params = screenParams(st, spec, tpl, newId);
++    if (params === undefined) continue;
++
+     const screen: Screen = {
+       id: newId,
+       name: spec.name ?? base?.name ?? newId,
+@@ -314,6 +360,7 @@ function stageScreens(st: Stage, input: unknown, defaultTemplate: string | undef
+       index: st.nextScreen++,
+       dynamic: true,
+       ...(tpl ? { template: tpl } : {}),
++      ...(Object.keys(params).length > 0 ? { params } : {}),
+     };
+     st.screens.set(newId, screen);
+ 
+@@ -565,7 +612,7 @@ export function cloneTree(tree?: NavigationTree): NavigationTree;
+ export function cloneTree(...args: unknown[]): NavigationTree {
+   const src = args[0] instanceof NavigationTree ? args[0] : requireDefaultTree();
+   const screens = new Map<string, Screen>();
+-  for (const [id, s] of src.screens) screens.set(id, deepFreeze({ ...s, meta: cloneJson(s.meta) }));
++  for (const [id, s] of src.screens) screens.set(id, deepFreeze({ ...s, meta: cloneJson(s.meta), ...(s.params ? { params: cloneJson(s.params) } : {}) }));
+   const edges: Edge[] = src.edges.map((e) => deepFreeze({ ...e, actions: cloneActions(e.actions), meta: cloneJson(e.meta) }));
+   const variables: Record<string, VariableDeclaration> = {};
+   for (const [k, v] of Object.entries(src.variables)) variables[k] = { ...v };
+diff --git a/src/instructions.ts b/src/instructions.ts
+index 3dfdb0e..6cc897b 100644
+--- a/src/instructions.ts
++++ b/src/instructions.ts
+@@ -146,9 +146,29 @@ function* generate(path: Path, options: BuildOptions): Job<Instructions> {
+     strict: options.strictVariables,
+   });
+ 
++  // Screen params apply to the edges that touch the screen: graph defaults < params < route variables < runtime.
++  const scopes = new Map<string, ReturnType<typeof buildScope>>();
++  const scopeFor = (edge: Edge) => {
++    const params = { ...(tree.screen(edge.from).params ?? {}), ...(tree.screen(edge.to).params ?? {}) };
++    if (Object.keys(params).length === 0) return scope;
++    const key = JSON.stringify(params);
++    let s = scopes.get(key);
++    if (!s) {
++      s = buildScope(tree.variables, {
++        params,
++        variables: { ...path.variables, ...(options.variables ?? {}) },
++        runtime: options.runtime,
++        strict: options.strictVariables,
++      });
++      scopes.set(key, s);
++    }
++    return s;
++  };
++
+   // 1. Resolve every payload up front so variable errors surface before any extension runs.
+   const steps: InstructionStep[] = path.edges.map((edge: Edge, i: number): InstructionStep => {
+     const arrival = tree.screen(edge.to);
++    const scope = scopeFor(edge);
+     const isAction = arrival.meta.kind === "action";
+     return {
+       n: i + 1,
+diff --git a/src/types.ts b/src/types.ts
+index 16d3202..6a6a4ca 100644
+--- a/src/types.ts
++++ b/src/types.ts
+@@ -59,6 +59,11 @@ export interface Screen {
+   readonly dynamic?: boolean;
+   /** Id of the screen this one was cloned from, when registered from a template. */
+   readonly template?: string;
++  /**
++   * Per item values for `$NAME$` references on the edges that touch this screen.
++   * They sit above graph defaults and below route variables.
++   */
++  readonly params?: JsonObject;
+ }
+ 
+ export interface ActionDeclaration {
+diff --git a/src/variables.ts b/src/variables.ts
+index 6c2c92e..084352d 100644
+--- a/src/variables.ts
++++ b/src/variables.ts
+@@ -5,6 +5,8 @@ import type { JsonObject, JsonValue, VariableDeclaration, VariableType } from ".
+ export type VariableScope = Readonly<Record<string, JsonValue>>;
+ 
+ export interface ScopeInputs {
++  /** Per item values from a registered screen. Override graph defaults, lose to route inputs. */
++  params?: Readonly<Record<string, JsonValue>>;
+   /** Route inputs. Override graph defaults. */
+   variables?: Readonly<Record<string, JsonValue>>;
+   /** Runtime values discovered during execution. Override route inputs. */
+@@ -86,7 +88,7 @@ export function matchesType(v: unknown, type: VariableType): boolean {
+ 
+ /**
+  * Build the effective variable scope.
+- * Precedence, lowest to highest: graph defaults, route inputs, runtime values.
++ * Precedence, lowest to highest: graph defaults, screen params, route inputs, runtime values.
+  * Every supplied value for a declared variable is type checked.
+  */
+ export function buildScope(
+@@ -99,6 +101,7 @@ export function buildScope(
+     if (d.hasDefault) setOwn(scope, name, d.default as JsonValue);
+   }
+   for (const [label, layer] of [
++    ["screen param", inputs.params],
+     ["route variable", inputs.variables],
+     ["runtime variable", inputs.runtime],
+   ] as const) {
+diff --git a/tests/params.test.ts b/tests/params.test.ts
+new file mode 100644
+index 0000000..dee1f91
+--- /dev/null
++++ b/tests/params.test.ts
+@@ -0,0 +1,99 @@
++import { afterEach, describe, expect, it } from "vitest";
++import { ValidationError, buildInstructionsSync, calculatePath, cloneTree, indexTreeFromText, registerScreens, setDefaultTree } from "../src";
++
++const GRAPH = (itemDecl = "VAR ITEM_ID : string") => `NAVGRAPH/2
++${itemDecl}
++VAR LABEL : string = "plain"
++SCREEN cart "Cart"
++SCREEN item_settings "Item settings"
++cart -> item_settings { DO TAP { "target": "Item card", "match": { "itemId": "$ITEM_ID$" }, "waitFor": "$LABEL$" } }
++item_settings -> cart { DO BACK {} }
++END`;
++
++afterEach(() => setDefaultTree(undefined));
++
++const tapData = (tree: ReturnType<typeof indexTreeFromText>, to: string, variables?: Record<string, never>) =>
++  buildInstructionsSync(calculatePath(tree, "cart", to, "astar", { variables }), {}).steps[0]!.actions[0]!.data;
++
++const codes = (fn: () => unknown) => {
++  try {
++    fn();
++  } catch (e) {
++    return e instanceof ValidationError ? e.diagnostics.map((d) => d.code) : [(e as { code?: string }).code];
++  }
++  return [];
++};
++
++describe("per item params", () => {
++  it("gives each template copy its own instructions, with ITEM_ID defaulting from the id", () => {
++    const tree = indexTreeFromText(GRAPH());
++    registerScreens(tree, ["product_1", "product_2"], "item_settings");
++    expect(tapData(tree, "item_settings:product_1").match).toEqual({ itemId: "product_1" });
++    expect(tapData(tree, "item_settings:product_2").match).toEqual({ itemId: "product_2" });
++    expect(tree.screen("item_settings:product_1").params).toEqual({ ITEM_ID: "product_1" });
++  });
++
++  it("keeps ids with colons whole after the template prefix", () => {
++    const tree = indexTreeFromText(GRAPH());
++    registerScreens(tree, ["sku:42"], "item_settings");
++    expect(tapData(tree, "item_settings:sku:42").match).toEqual({ itemId: "sku:42" });
++  });
++
++  it("takes explicit params per id, and they beat the ITEM_ID default", () => {
++    const tree = indexTreeFromText(GRAPH());
++    registerScreens(tree, [{ id: "p1", params: { ITEM_ID: "SKU-9", LABEL: "special" } }, "p2"], "item_settings");
++    expect(tapData(tree, "item_settings:p1")).toMatchObject({ match: { itemId: "SKU-9" }, waitFor: "special" });
++    expect(tapData(tree, "item_settings:p2")).toMatchObject({ match: { itemId: "p2" }, waitFor: "plain" });
++  });
++
++  it("ranks graph defaults < screen params < route variables", () => {
++    const tree = indexTreeFromText(GRAPH('VAR ITEM_ID : string = "from-graph"'));
++    registerScreens(tree, ["p1"], "item_settings");
++    expect(tapData(tree, "item_settings:p1").match).toEqual({ itemId: "p1" });
++    const path = calculatePath(tree, "cart", "item_settings:p1", "astar", { variables: { ITEM_ID: "from-route" } });
++    expect(buildInstructionsSync(path).steps[0]!.actions[0]!.data.match).toEqual({ itemId: "from-route" });
++  });
++
++  it("does not leak params onto edges that do not touch the screen", () => {
++    const tree = indexTreeFromText(GRAPH());
++    registerScreens(tree, ["p1", "p2"], "item_settings");
++    const out = buildInstructionsSync(calculatePath(tree, "item_settings:p1", "item_settings:p2"));
++    expect(out.steps.map((s) => s.to)).toEqual(["cart", "item_settings:p2"]);
++    expect(out.steps[1]!.actions[0]!.data.match).toEqual({ itemId: "p2" });
++  });
++
++  it("rejects params that are not declared variables or have the wrong type, and changes nothing", () => {
++    const tree = indexTreeFromText(GRAPH());
++    expect(codes(() => registerScreens(tree, [{ id: "p1", params: { NOPE: "x" } }], "item_settings"))).toEqual(["UNKNOWN_PARAM"]);
++    expect(codes(() => registerScreens(tree, [{ id: "p1", params: { ITEM_ID: 5 } }], "item_settings"))).toEqual(["PARAM_TYPE"]);
++    expect(codes(() => registerScreens(tree, [{ id: "p1", params: "x" as never }], "item_settings"))).toEqual(["INVALID_REGISTRATION"]);
++    expect(tree.hasScreen("item_settings:p1")).toBe(false);
++  });
++
++  it("reports an unfilled $ITEM_ID$ when the template never declared it", () => {
++    const tree = indexTreeFromText(GRAPH("VAR OTHER : string = \"x\""), { diagnostics: "collect" });
++    expect(tree.diagnostics.some((d) => d.severity === "error")).toBe(true);
++    const clean = indexTreeFromText(`NAVGRAPH/2
++SCREEN cart "Cart"
++SCREEN item_settings "Item settings"
++cart -> item_settings { DO TAP { "target": "Card" } }
++item_settings -> cart
++END`);
++    registerScreens(clean, ["p1"], "item_settings"); // nothing to fill, nothing declared: fine
++    expect(clean.screen("item_settings:p1").params).toBeUndefined();
++  });
++
++  it("a required variable with no param and no route value fails at build time", () => {
++    const tree = indexTreeFromText(GRAPH('VAR ITEM_ID : string'));
++    registerScreens(tree, ["p1"], "item_settings");
++    expect(() => buildInstructionsSync(calculatePath(tree, "cart", "item_settings"))).toThrow(/ITEM_ID/);
++  });
++
++  it("survives cloneTree and is independent of the original", () => {
++    const tree = indexTreeFromText(GRAPH());
++    registerScreens(tree, ["p1"], "item_settings");
++    const copy = cloneTree(tree);
++    expect(tapData(copy, "item_settings:p1").match).toEqual({ itemId: "p1" });
++    expect(copy.screen("item_settings:p1").params).not.toBe(tree.screen("item_settings:p1").params);
++  });
++});
+-- 
+2.43.0
+

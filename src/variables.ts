@@ -5,6 +5,8 @@ import type { JsonObject, JsonValue, VariableDeclaration, VariableType } from ".
 export type VariableScope = Readonly<Record<string, JsonValue>>;
 
 export interface ScopeInputs {
+  /** Per item values from a registered screen. Override graph defaults, lose to route inputs. */
+  params?: Readonly<Record<string, JsonValue>>;
   /** Route inputs. Override graph defaults. */
   variables?: Readonly<Record<string, JsonValue>>;
   /** Runtime values discovered during execution. Override route inputs. */
@@ -86,7 +88,7 @@ export function matchesType(v: unknown, type: VariableType): boolean {
 
 /**
  * Build the effective variable scope.
- * Precedence, lowest to highest: graph defaults, route inputs, runtime values.
+ * Precedence, lowest to highest: graph defaults, screen params, route inputs, runtime values.
  * Every supplied value for a declared variable is type checked.
  */
 export function buildScope(
@@ -99,6 +101,7 @@ export function buildScope(
     if (d.hasDefault) setOwn(scope, name, d.default as JsonValue);
   }
   for (const [label, layer] of [
+    ["screen param", inputs.params],
     ["route variable", inputs.variables],
     ["runtime variable", inputs.runtime],
   ] as const) {

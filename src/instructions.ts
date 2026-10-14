@@ -146,9 +146,29 @@ function* generate(path: Path, options: BuildOptions): Job<Instructions> {
     strict: options.strictVariables,
   });
 
+  // Screen params apply to the edges that touch the screen: graph defaults < params < route variables < runtime.
+  const scopes = new Map<string, ReturnType<typeof buildScope>>();
+  const scopeFor = (edge: Edge) => {
+    const params = { ...(tree.screen(edge.from).params ?? {}), ...(tree.screen(edge.to).params ?? {}) };
+    if (Object.keys(params).length === 0) return scope;
+    const key = JSON.stringify(params);
+    let s = scopes.get(key);
+    if (!s) {
+      s = buildScope(tree.variables, {
+        params,
+        variables: { ...path.variables, ...(options.variables ?? {}) },
+        runtime: options.runtime,
+        strict: options.strictVariables,
+      });
+      scopes.set(key, s);
+    }
+    return s;
+  };
+
   // 1. Resolve every payload up front so variable errors surface before any extension runs.
   const steps: InstructionStep[] = path.edges.map((edge: Edge, i: number): InstructionStep => {
     const arrival = tree.screen(edge.to);
+    const scope = scopeFor(edge);
     const isAction = arrival.meta.kind === "action";
     return {
       n: i + 1,

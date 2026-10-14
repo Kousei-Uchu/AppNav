@@ -10,6 +10,7 @@ import {
   type ValidateOptions,
 } from "./graph";
 import { cloneJson, deepFreeze, isPlainObject } from "./json";
+import { matchesType, typeOfValue } from "./variables";
 import type { ResolvedSchema, SchemaDefinition } from "./schema";
 import type { ActionDeclaration, Diagnostic, Edge, JsonObject, Screen, VariableDeclaration } from "./types";
 
@@ -37,6 +38,13 @@ export interface ScreenSpec {
   template?: string;
   /** Copy edges incident to the template screen. Default true. */
   cloneEdges?: boolean;
+  /**
+   * Per item values for the `$NAME$` references on this screen's edges, for
+   * example `{ ITEM_ID: "product_1" }`. Every name must be a declared variable
+   * and its value must fit the declared type. `ITEM_ID` defaults to the part of
+   * the id after the template prefix when the tree declares a variable of that name.
+   */
+  params?: JsonObject;
 }
 
 /** A screen to register: a bare id, or an object when it needs a name, metadata or its own template. */
@@ -242,7 +250,7 @@ function cloneActions(actions: readonly ActionDeclaration[]): ActionDeclaration[
 // JavaScript callers who pass anything else get an INVALID_REGISTRATION
 // diagnostic that shows the right call, instead of items quietly dropped.
 
-const SCREEN_KEYS = new Set(["id", "name", "meta", "template", "cloneEdges"]);
+const SCREEN_KEYS = new Set(["id", "name", "meta", "template", "cloneEdges", "params"]);
 const EDGE_KEYS = new Set(["from", "to", "id", "cost", "condition", "meta", "actions"]);
 const PATCH_KEYS = new Set(["template", "screens", "edges"]);
 
@@ -268,7 +276,12 @@ function screenSpecs(st: Stage, input: unknown): ScreenSpec[] {
   input.forEach((item: unknown, i) => {
     if (typeof item === "string") out.push({ id: item });
     else if (isPlainObject(item) && typeof item.id === "string") {
-      if (!unknownKeys(st, "option", item, SCREEN_KEYS, `Screen "${item.id}"`)) out.push(item as unknown as ScreenSpec);
+      if (unknownKeys(st, "option", item, SCREEN_KEYS, `Screen "${item.id}"`)) return;
+      if (item.params !== undefined && !isPlainObject(item.params)) {
+        problem(st, "INVALID_REGISTRATION", `Screen "${item.id}": "params" must be an object such as { ITEM_ID: "${item.id}" }`, [item.id]);
+        return;
+      }
+      out.push(item as unknown as ScreenSpec);
     } else {
       problem(st, "INVALID_REGISTRATION", `Screen ${i} must be an id string or an object with a string "id". Use ${USAGE.screens}`, []);
     }
@@ -295,6 +308,36 @@ function edgeSpecs(st: Stage, input: unknown): EdgeSpec[] {
 // ---------------------------------------------------------------------------
 // Staging
 
+/** The part of a template instance id after the template prefix, used as the default ITEM_ID. */
+function itemIdOf(id: string, template: string | undefined): string | undefined {
+  if (template && id.startsWith(`${template}:`)) return id.slice(template.length + 1);
+  return undefined;
+}
+
+/**
+ * Work out and check a screen's params: explicit ones plus the ITEM_ID default.
+ * Returns undefined (after reporting) when a param is not a declared variable or has the wrong type.
+ */
+function screenParams(st: Stage, spec: ScreenSpec, template: string | undefined, id: string): JsonObject | undefined {
+  const declared = st.tree.variables;
+  const params: JsonObject = {};
+  const itemId = itemIdOf(id, template);
+  if (itemId !== undefined && declared.ITEM_ID) params.ITEM_ID = itemId;
+  for (const [name, value] of Object.entries(spec.params ?? {})) params[name] = cloneJson(value);
+  let ok = true;
+  for (const [name, value] of Object.entries(params)) {
+    const decl = declared[name];
+    if (!decl) {
+      problem(st, "UNKNOWN_PARAM", `Screen "${id}": param "${name}" is not a declared variable. Declare it with VAR ${name} : <type>`, [id, name]);
+      ok = false;
+    } else if (!matchesType(value, decl.type)) {
+      problem(st, "PARAM_TYPE", `Screen "${id}": param "${name}" must be ${decl.type}, got ${typeOfValue(value)}`, [id, name]);
+      ok = false;
+    }
+  }
+  return ok ? params : undefined;
+}
+
 function stageScreens(st: Stage, input: unknown, defaultTemplate: string | undefined, options: RegisterOptions): void {
   for (const spec of screenSpecs(st, input)) {
     const tpl = spec.template ?? defaultTemplate;
@@ -307,6 +350,9 @@ function stageScreens(st: Stage, input: unknown, defaultTemplate: string | undef
       continue;
     }
 
+    const params = screenParams(st, spec, tpl, newId);
+    if (params === undefined) continue;
+
     const screen: Screen = {
       id: newId,
       name: spec.name ?? base?.name ?? newId,
@@ -314,6 +360,7 @@ function stageScreens(st: Stage, input: unknown, defaultTemplate: string | undef
       index: st.nextScreen++,
       dynamic: true,
       ...(tpl ? { template: tpl } : {}),
+      ...(Object.keys(params).length > 0 ? { params } : {}),
     };
     st.screens.set(newId, screen);
 
@@ -565,7 +612,7 @@ export function cloneTree(tree?: NavigationTree): NavigationTree;
 export function cloneTree(...args: unknown[]): NavigationTree {
   const src = args[0] instanceof NavigationTree ? args[0] : requireDefaultTree();
   const screens = new Map<string, Screen>();
-  for (const [id, s] of src.screens) screens.set(id, deepFreeze({ ...s, meta: cloneJson(s.meta) }));
+  for (const [id, s] of src.screens) screens.set(id, deepFreeze({ ...s, meta: cloneJson(s.meta), ...(s.params ? { params: cloneJson(s.params) } : {}) }));
   const edges: Edge[] = src.edges.map((e) => deepFreeze({ ...e, actions: cloneActions(e.actions), meta: cloneJson(e.meta) }));
   const variables: Record<string, VariableDeclaration> = {};
   for (const [k, v] of Object.entries(src.variables)) variables[k] = { ...v };

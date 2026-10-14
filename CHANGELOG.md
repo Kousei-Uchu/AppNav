@@ -22,6 +22,7 @@ Keep a Changelog and the project follows semantic versioning.
 - `unregisterScreens` and `unregisterEdges` throw `INVALID_REGISTRATION` for a selector that is not an id, an array of ids, or (screens only) `{ template }`.
 - Moved the source scanner and the `NavGraphWatcher` component out of the core package into `packages/devtools`, a separate private package. The scanner had stray shell lines at the end of the file and did not parse; fixed. Its unused `--graph` option is gone. The README no longer claims a CLI merge step or a diff, since neither existed. The `scan` npm script is removed.
 - Added a worked example, `examples/recover-extra-quantity.ts`, with a README section and a test that runs it: route to an action node with a variable `repeat`, then back to the tutorial step, with the app doing its own re-plan.
+- Template copies are now per item. `registerScreens(ids, template)` accepts `{ id, params }`, stores `params` on the screen, and resolves them when instructions are built (graph defaults < screen params < route variables < runtime). `ITEM_ID` defaults to the part of the id after the template prefix when the tree declares it. Unknown or mistyped params are rejected (`UNKNOWN_PARAM`, `PARAM_TYPE`). Before, every copy produced identical instructions.
 - Removed the `MutableGraphData` type. The no-tree form of `register_screens` no longer builds an empty tree, and now uses the default tree.
 
 ## 0.1.0
