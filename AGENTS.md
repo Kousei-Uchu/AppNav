@@ -15,6 +15,10 @@ Checklist when generating or editing a `.navgraph`:
 6. Quote `if=` expressions that contain commas or brackets.
 7. Validate with `validateGraph(parseGraph(text))` or `indexTreeFromText(text, { diagnostics: "collect" })` and read `diagnostics` (each has code, line, column).
 
+Checklist when writing code against the API (dynamic graphs):
+- Dynamic registration (`registerScreens`, `addEdges`, `addActions`, `cloneTree`) returns a new tree. The source tree is never mutated.
+- Template copies clone incident edges when `cloneEdges` is true.
+
 Checklist when writing code against the API:
 - Routes are synchronous. Instruction building is async by default (`buildInstructions`) with a sync twin (`buildInstructionsSync`).
 - React Native: use `indexTreeFromText` with bundled text, or pass `readFile` to `indexTree`.

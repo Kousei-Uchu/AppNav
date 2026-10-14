@@ -104,6 +104,7 @@ export {
   type HandlerContext,
   type HandlerOptions,
 } from "./runtime";
+export * from "./dynamic";
 
 import * as AppNavNamespace from "./api-namespace";
 /** Namespace object for `import { AppNav } from "routegraph"`. */

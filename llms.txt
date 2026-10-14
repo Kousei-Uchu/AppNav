@@ -89,7 +89,11 @@ Runtime (optional, opt in)
 
 Errors: all extend `AppNavError` with `code`, and `file`, `line`, `column`, `ids` where known. Classes: `ParseError`, `ValidationError`, `SchemaError`, `VariableError`, `ConditionError`, `NoPathError`, `ExtensionError`, `AsyncExtensionError`, `UnknownScreenError`, `ActionHandlerError`, `FileLoadError`.
 
-## Common mistakes
+## Dynamic registration
+- `registerScreens(tree, input, template?)`, `addEdges`, `addActions`, `cloneTree`. Return new trees; source trees are never mutated.
+- Template copies clone incident edges when `cloneEdges` is true.
+
+## Common mistakes:
 
 - Using `calculatePath` result without `variables` and then hitting a required-variable error at build time. Pass `variables` to either call.
 - Expecting a reverse edge. Add `b -> a` yourself.

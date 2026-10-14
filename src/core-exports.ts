@@ -14,3 +14,4 @@ export {
 export { buildInstructions, buildInstructionsSync, isAction } from "./instructions";
 export { defineExtension, getExtensionOutput } from "./extensions";
 export { createRuntime, registerActionHandler } from "./runtime";
+export * from "./dynamic";

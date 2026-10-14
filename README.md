@@ -424,6 +424,37 @@ The design document left a number of questions open. These are the choices this 
 13. `tree.<id>` shortcuts are defined only for safe identifiers.
 14. Unresolved payloads are available through `includeUnresolved`.
 
+## Dynamic registration
+
+Screens, edges, and actions can be added at runtime, producing a new tree. This is useful when a list of products or cart lines only exists at runtime.
+
+```ts
+import { registerScreens, addEdges, cloneTree } from "routegraph";
+
+const tree = indexTreeFromText(text);
+
+// Clone the `item_settings` screen once per product id.
+const withSettings = registerScreens(tree, ["product_1", "product_2"], "item_settings");
+
+// Add an explicit transition carrying a runtime action.
+const ready = addEdges(withSettings, {
+  from: "cart",
+  to: "cart",
+  actions: [{ type: "REMOVE_ITEM", data: { target: "product_1" } }],
+});
+```
+
+Instance methods (`tree.registerScreens(...)`) and snake-case aliases (`register_screens`) also exist. `cloneTree` forks a tree so the original stays untouched.
+
+## Automatic mapping (optional)
+
+A scanner and a watcher are provided as optional tooling:
+
+- `tools/scan-app.js`: scans source files for `navigation.navigate`, `router.push`, screen components, and action calls, emits a candidate `.navgraph` patch and a unified diff against an existing graph.
+- `NavGraphWatcher` React component (see `examples/watcher.tsx`): wraps the root of an app, records screen/action transitions as you use it, and writes a local `.extend.navgraph` that can be merged through the CLI.
+
+Both are opt-in and do not affect the core package size when unused.
+
 ## Development
 
 ```sh
