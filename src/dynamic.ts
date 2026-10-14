@@ -345,16 +345,35 @@ export const addEdge = addEdges;
 
 export function addActions(target: unknown, screenId: unknown, actionsInput: unknown, targetScreenId?: string, options?: any): NavigationTree {
   const data = extract(target);
-  const from = String(screenId);
-  const to = targetScreenId ?? from;
+  const parent = String(screenId);
+  const destination = targetScreenId ?? parent;
   const normalized = Array.isArray(actionsInput)
     ? actionsInput
     : isPlainObject(actionsInput) && Array.isArray((actionsInput as any).actions)
       ? (actionsInput as any).actions
       : isPlainObject(actionsInput)
-        ? Object.entries(actionsInput as Record<string, unknown>).map(([type, data]) => ({ type, data }))
+        ? Object.entries(actionsInput as Record<string, unknown>).map(([type, value]) => ({ type, data: value }))
         : [];
-  addEdgesImpl(data, [{ from, to, actions: normalized as any }]);
+
+  const actionId =
+    isPlainObject(actionsInput) && typeof (actionsInput as any).id === "string"
+      ? (actionsInput as any).id
+      : `${parent}:action`;
+
+  if (!data.screens.has(actionId)) {
+    data.screens.set(actionId, {
+      id: actionId,
+      name:
+        isPlainObject(actionsInput) && typeof (actionsInput as any).name === "string"
+          ? ((actionsInput as any).name as string)
+          : `Action ${actionId}`,
+      meta: { kind: "action" } as JsonObject,
+      index: data.screens.size,
+    });
+  }
+
+  addEdgesImpl(data, [{ from: parent, to: actionId, actions: [] }]);
+  addEdgesImpl(data, [{ from: actionId, to: destination, actions: normalized as any }]);
   return buildTree(data);
 }
 

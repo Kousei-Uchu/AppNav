@@ -24,7 +24,7 @@ export interface ParseOptions {
 const IDENT_START = /[A-Za-z_]/;
 const IDENT_PART = /[A-Za-z0-9_]/;
 const ID_PART = /[A-Za-z0-9_.:]/;
-const KEYWORDS = new Set(["APP", "VAR", "SCREEN", "END", "DO"]);
+const KEYWORDS = new Set(["APP", "VAR", "SCREEN", "ACTION", "END", "DO"]);
 
 /**
  * Parse `.navgraph` source text into a Graph. This performs syntax checks only;
@@ -321,13 +321,15 @@ export function parseGraph(text: string, options: ParseOptions = {}): Graph {
         if (graph.app !== undefined) fail("Duplicate APP declaration", itemAt, "DUPLICATE_APP");
         graph.app = readString();
         expectEol("APP declaration");
-      } else if (word === "SCREEN") {
-        const id = readId("a screen id");
+      } else if (word === "SCREEN" || word === "ACTION") {
+        const actionNode = word === "ACTION";
+        const id = readId(`a ${actionNode ? "action" : "screen"} id`);
         skipInline();
         const name = readString();
         skipInline();
         const meta: JsonObject = peek() === "{" ? readJsonObject() : {};
-        expectEol("SCREEN declaration");
+        if (actionNode) setOwn(meta, "kind", meta.kind ?? "action");
+        expectEol(`${word} declaration`);
         const loc = locate(itemAt);
         const screen: RawScreen = { id, name, meta, line: loc.line, column: loc.column };
         graph.screens.push(screen);

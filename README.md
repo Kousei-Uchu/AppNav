@@ -446,6 +446,16 @@ const ready = addEdges(withSettings, {
 
 Instance methods (`tree.registerScreens(...)`) and snake-case aliases (`register_screens`) also exist. `cloneTree` forks a tree so the original stays untouched.
 
+Static action nodes are supported too, both in files and at runtime:
+
+```text
+ACTION remove_item "Remove item"
+cart -> remove_item { DO TAP { "target": "Item row" } }
+remove_item -> cart { DO SWIPE { "direction": "left" } }
+```
+
+`registerActions` / `addActions` create these action nodes and the surrounding transitions automatically.
+
 ## Automatic mapping (optional)
 
 A scanner and a watcher are provided as optional tooling:
