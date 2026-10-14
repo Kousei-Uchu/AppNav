@@ -25,6 +25,7 @@ Checklist when writing code against the API (dynamic graphs):
 - Registered screens, edges and actions are validated like a parsed graph. Action types must exist in the tree's schema. Failures throw `ValidationError`; `{ diagnostics: "collect" }` keeps the valid items instead.
 - `registerActions(screen, { name: { actions: [...] } })` needs a name per action. Duplicate ids error unless `onDuplicate` is `"skip"` or `"replace"`.
 - Registered actions accept `repeat` (a whole number >= 1, or a `$VAR$` the route supplies). It appears on the instruction action as `repeat`.
+- Recovery is the app's job: the app passes the current screen and the goal to `calculatePath`, once per leg (see `examples/recover-extra-quantity.ts`). Do not look for position tracking or off-track detection in routegraph.
 - Action nodes perform their actions on the edge into the node (`cart -> remove_item`). The edge back is empty and free. Write `ACTION` nodes in files the same way.
 - Template copies clone incident edges when `cloneEdges` is true. A registration call is all or nothing.
 

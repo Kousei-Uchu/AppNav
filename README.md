@@ -561,6 +561,38 @@ const out = buildInstructionsSync(calculatePath(tree, "home", "remove_item"));
 // path: home, cart, remove_item. The last step carries the SWIPE.
 ```
 
+### Worked example: recovering when the user goes off track
+
+The app owns recovery. routegraph does not know where the user is and never decides that they are off track. Your app notices (for example, a tutorial expects one item in the cart and there are five), picks the goal, and asks for a route from the screen it believes the user is on. Planning from any screen is one `calculatePath` call.
+
+```ts
+import { ASTAR, buildInstructionsSync, calculatePath, indexTreeFromText, registerActions } from "routegraph";
+
+const tree = indexTreeFromText(`NAVGRAPH/2
+VAR EXTRA_QUANTITY : number = 1
+SCREEN cart "Cart"
+SCREEN tutorial_end "Checkout step"
+cart -> tutorial_end { DO TAP { "target": "Checkout" } }
+END`);
+
+registerActions(tree, "cart", {
+  decrease_quantity: {
+    name: "Reduce quantity",
+    actions: [{ type: "TAP", data: { target: "Reduce Quantity" }, repeat: "$EXTRA_QUANTITY$" }],
+  },
+});
+
+// The app decides to recover: four too many, user is on the cart.
+const doIt = calculatePath(tree, "cart", "decrease_quantity", ASTAR, { variables: { EXTRA_QUANTITY: 4 } });
+const goBack = calculatePath(tree, "decrease_quantity", "tutorial_end", ASTAR);
+
+const legs = [buildInstructionsSync(doIt), buildInstructionsSync(goBack)];
+// legs[0]: one step into the node, kind "action", TAP "Reduce Quantity" with repeat 4 (show "x4").
+// legs[1]: an empty step back to the cart, then TAP "Checkout" to reach the tutorial step.
+```
+
+Each leg is its own `Instructions` object, so the app can show "now go back to the tutorial" between them. The same code is in `examples/recover-extra-quantity.ts` and is run by `tests/recovery-example.test.ts`, so it cannot drift from the API.
+
 ## Development helpers (optional)
 
 A source scanner and a click watcher live in `packages/devtools`, a separate private package that is not published with routegraph. See its README. The scanner proposes `SCREEN` lines from `navigation.navigate`, `router.push` and `<Stack.Screen>` calls. The watcher logs edge lines to the console. Neither merges anything for you, and routegraph itself ships no command line tool.
