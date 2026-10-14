@@ -1,0 +1,868 @@
+From 7560d8b2218349c741306da17dd39696b9342e02 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 14 Oct 2026 13:43:00 +1100
+Subject: [PATCH] Add a repeat count to actions (issue 5)
+
+Nothing could say "press Reduce Quantity four times".
+
+- `repeat` on an action: `DO TAP { ... } repeat=4` in files, `repeat=$NAME$`
+  for a number variable the app supplies, and `{ type, data, repeat }` for
+  registered edges and actions. It sits next to `data`, so action schemas are
+  unaffected, and template copies keep it.
+- Validation rejects counts that are not whole numbers of at least 1, text,
+  mixed templates, and references to undeclared or non-numeric variables
+  (INVALID_REPEAT, UNDEFINED_VARIABLE).
+- Instruction actions carry `repeat` only when declared, as data on the step
+  instead of duplicated steps. A variable that resolves to a bad count throws
+  a VariableError with the code INVALID_REPEAT.
+- The runtime runs a repeated action's handler once per repetition and
+  passes `iteration` and `iterations`. A failed repetition ends that action.
+- Tests in tests/repeat.test.ts; README, llms.txt, AGENTS.md and CHANGELOG
+  updated.
+
+A repeat on a planRoute waypoint is not part of this change: planRoute is
+not in the repository yet.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Xc76J2b393T2P28QKDsk2x
+---
+ AGENTS.md            |   4 +-
+ CHANGELOG.md         |   1 +
+ README.md            |  39 ++++++-
+ llms.txt             |   7 +-
+ src/dynamic.ts       |  27 ++++-
+ src/graph.ts         |  24 ++++-
+ src/instructions.ts  |  33 +++++-
+ src/parser.ts        |  35 +++++-
+ src/runtime.ts       | 131 +++++++++++++----------
+ src/types.ts         |   6 ++
+ tests/repeat.test.ts | 248 +++++++++++++++++++++++++++++++++++++++++++
+ 11 files changed, 479 insertions(+), 76 deletions(-)
+ create mode 100644 tests/repeat.test.ts
+
+diff --git a/AGENTS.md b/AGENTS.md
+index 95cfb3f..84527e4 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -13,7 +13,8 @@ Checklist when generating or editing a `.navgraph`:
+ 4. Every `DO TYPE` must exist in the active schema, and payloads must satisfy its `required` and `properties`.
+ 5. Costs are non-negative numbers. Use cost for "how bad is this transition", not for action counts.
+ 6. Quote `if=` expressions that contain commas or brackets.
+-7. Validate with `validateGraph(parseGraph(text))` or `indexTreeFromText(text, { diagnostics: "collect" })` and read `diagnostics` (each has code, line, column).
++7. Use `repeat=N` or `repeat=$VAR$` after a `DO` payload for "do this N times". Do not write the same `DO` line several times, and remember cost is per edge, not per repetition.
++8. Validate with `validateGraph(parseGraph(text))` or `indexTreeFromText(text, { diagnostics: "collect" })` and read `diagnostics` (each has code, line, column).
+ 
+ Checklist when writing code against the API (dynamic graphs):
+ - Dynamic registration (`registerScreens`, `registerEdges`, `registerActions`) changes the tree in place and returns the same tree. Use `cloneTree` for an independent copy.
+@@ -21,6 +22,7 @@ Checklist when writing code against the API (dynamic graphs):
+ - Added items are flagged `dynamic`. Remove them with `unregisterScreens`, `unregisterEdges` or `clearDynamic`. File items cannot be removed.
+ - Registered screens, edges and actions are validated like a parsed graph. Action types must exist in the tree's schema. Failures throw `ValidationError`; `{ diagnostics: "collect" }` keeps the valid items instead.
+ - `registerActions(screen, { name: { actions: [...] } })` needs a name per action. Duplicate ids error unless `onDuplicate` is `"skip"` or `"replace"`.
++- Registered actions accept `repeat` (a whole number >= 1, or a `$VAR$` the route supplies). It appears on the instruction action as `repeat`.
+ - Action nodes perform their actions on the edge into the node (`cart -> remove_item`). The edge back is empty and free. Write `ACTION` nodes in files the same way.
+ - Template copies clone incident edges when `cloneEdges` is true. A registration call is all or nothing.
+ 
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 8ad817a..918a7db 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -14,6 +14,7 @@ Keep a Changelog and the project follows semantic versioning.
+ - `registerActions` now requires a name per action (`registerActions(screen, { remove_item: { actions } })`). The name is the node id, so actions on one screen no longer share a default id or pile up duplicate edges. The old bare-array form is rejected.
+ - Registering an id that already exists is now an error instead of being ignored silently. Added `onDuplicate: "error" | "skip" | "replace"`.
+ - Action nodes now perform the action on the way in. `registerActions` puts the actions on the edge into the node and makes the edge back to the parent (or `to`) empty with cost 0, so a route that ends at an action node ends with the action. Before, the actions sat on the edge leaving the node and a route to the node told the user to do nothing. Graph files should write `ACTION` nodes the same way.
++- Added a repeat count for actions. `DO TAP { ... } repeat=4`, or `repeat=$NAME$` for a number variable the app supplies, and `{ type, data, repeat }` for registered actions. The instruction action carries `repeat` (only when declared), so an app can show "x4" without duplicated steps. Validation rejects counts that are not whole numbers of at least 1 (`INVALID_REPEAT`), and a variable that resolves to a bad count throws a `VariableError`. The runtime runs a repeated action's handler once per repetition and passes `iteration` and `iterations`.
+ - Edge ids for registered edges are deterministic, with no random suffix.
+ - Removed the `MutableGraphData` type. The no-tree form of `register_screens` no longer builds an empty tree, and now uses the default tree.
+ 
+diff --git a/README.md b/README.md
+index 1863ae4..31e3fa1 100644
+--- a/README.md
++++ b/README.md
+@@ -121,7 +121,7 @@ NAVGRAPH/2                      header, required, first non-comment line
+ APP "Name"                      optional
+ VAR NAME : type [= json]        zero or more
+ SCREEN id "Display Name" [{json metadata}]
+-src -> dst [attrs] [{ DO TYPE {json} ... }]
++src -> dst [attrs] [{ DO TYPE {json} [repeat=N] ... }]
+ END                             optional, nothing may follow it
+ ```
+ 
+@@ -150,6 +150,27 @@ a -> b [cost=2, if=SIGNED_IN, id=hop, label="Go", weight=7]
+ 
+ The cost belongs to the edge, not to the actions. An edge with three actions and `cost=3` is still one transition.
+ 
++### Repeating an action
++
++Put `repeat` after the payload to say "do this action N times in a row", such as pressing a button four times:
++
++```
++cart -> decrease_quantity { DO TAP { "target": "Reduce Quantity" } repeat=4 }
++cart -> decrease_quantity { DO TAP { "target": "Reduce Quantity" } repeat=$EXTRA_QUANTITY$ }
++```
++
++`repeat` sits next to the payload, not inside it, so action schemas are not affected. It is a whole number of at least 1, or one reference to a `number` (or `any`) variable, written bare (`repeat=$EXTRA_QUANTITY$`) or quoted (`repeat="$EXTRA_QUANTITY$"`). A variable is resolved when instructions are built, so the app can work the count out from its current state and pass it as a route variable.
++
++Validation rejects `0`, negatives, fractions, text, and references to undeclared or non numeric variables with `INVALID_REPEAT`. If a variable resolves to something that is not a whole number of at least 1, `buildInstructions` throws a `VariableError` with the code `INVALID_REPEAT`.
++
++The step is not duplicated. The output keeps one action and adds the count, so an app can show "x4":
++
++```json
++{ "type": "TAP", "data": { "target": "Reduce Quantity" }, "repeat": 4, "extensions": {} }
++```
++
++Actions without a `repeat` have no `repeat` field. Repeating does not change the cost of the edge.
++
+ ### Conditions
+ 
+ Conditions use a small, safe expression language. There is no `eval` and no JavaScript.
+@@ -198,7 +219,7 @@ Substitution happens inside action payload strings:
+ | `"$$PRODUCT_ID$$"` | `"$PRODUCT_ID$"` (escaped literal) |
+ | `"costs $5"` | `"costs $5"` (a lone `$` is left alone) |
+ 
+-A string that is exactly one reference gets the variable's native type. Embedded references use the string form, with objects and arrays written as JSON. Only values are substituted, never object keys. Undefined variables and missing required values throw a `VariableError` instead of producing an empty string.
++A variable can also be an action's `repeat` count (see "Repeating an action"). A string that is exactly one reference gets the variable's native type. Embedded references use the string form, with objects and arrays written as JSON. Only values are substituted, never object keys. Undefined variables and missing required values throw a `VariableError` instead of producing an empty string.
+ 
+ Precedence, lowest to highest:
+ 
+@@ -320,7 +341,7 @@ Notes:
+ }
+ ```
+ 
+-It is ordinary JSON. Options for `buildInstructions`: `variables`, `runtime`, `extensions`, `extensionVariables`, `onError`, `includeUnresolved` (keeps the original payload on each action as `unresolved`, handy for debugging), and `strictVariables`.
++It is ordinary JSON. An action that declares a `repeat` carries the resolved count as `repeat`; other actions have no such field. Options for `buildInstructions`: `variables`, `runtime`, `extensions`, `extensionVariables`, `onError`, `includeUnresolved` (keeps the original payload on each action as `unresolved`, handy for debugging), and `strictVariables`.
+ 
+ Narrow actions with `isAction`:
+ 
+@@ -399,6 +420,8 @@ runtime.executeSync(instructions, { context: { driver } });
+ 
+ Handlers get the validated, resolved payload plus your context. Options include `timeoutMs`, `retries`, `retryDelayMs`, `skipUnhandled`, `continueOnError`, `signal` (an `AbortSignal`), and an `onAction` callback. A global registry is available through `registerActionHandler` for apps that prefer one.
+ 
++An action with a `repeat` runs its handler that many times in a row. Handlers receive `iteration` and `iterations` (both 1 when there is no repeat), and each repetition produces its own entry in `results` with `iteration` set. A failed repetition ends the run of that action, so it is never repeated blindly.
++
+ ## Typing and extensibility
+ 
+ - `indexTree<"home" | "cart">(...)` gives typed `tree.home` and `tree.cart` shortcuts. Without the type argument use `tree.screen("home")`, or `tree.screens.get("home")`, which is the authoritative lookup. Shortcuts exist only for ids that are valid JavaScript identifiers and do not collide with tree members, and they are not enumerable.
+@@ -488,6 +511,16 @@ registerActions("cart", {
+ });
+ ```
+ 
++Actions inside `actions` take `repeat` like file actions do, as a number or a `$NAME$` reference to a variable the app fills in when it plans:
++
++```ts
++registerActions("cart", {
++  decrease_quantity: { actions: [{ type: "TAP", data: { target: "Reduce Quantity" }, repeat: "$EXTRA_QUANTITY$" }] },
++});
++// declare VAR EXTRA_QUANTITY : number in the graph, then:
++calculatePath(tree, "cart", "decrease_quantity", "astar", { variables: { EXTRA_QUANTITY: 4 } });
++```
++
+ Each action accepts `name`, `actions`, `to` (the screen you end on, default the parent) and `cost` (of the transition into the node, which is where the actions run, default 1). The edge out of the node goes to `to`, has no actions and costs 0. If `to` is another screen, the node acts as a transition that performs the actions first. An unnamed action, such as a bare array, is rejected with an error that shows the call to use.
+ 
+ ```ts
+diff --git a/llms.txt b/llms.txt
+index d1acf58..2d92f7f 100644
+--- a/llms.txt
++++ b/llms.txt
+@@ -43,6 +43,7 @@ Rules:
+ - Edges are directed. Never assume a reverse edge. Cost belongs to the edge, not the action count. Default cost 1.
+ - Edge ids default to `src->dst` (`#2`, `#3` for repeats) unless `id=` is given.
+ - `DO TYPE {json}`: TYPE must exist in the schema. Default actions: TAP, LONG_PRESS, TYPE, SWIPE, SCROLL, BACK, WAIT, SET_STATE, ASSERT.
++- `DO TAP {json} repeat=4` or `repeat=$COUNT$` means "do it N times in a row". N is a whole number >= 1 or a `number` variable. Output keeps one action with `repeat: N`; never duplicate `DO` lines for this. Bad counts are `INVALID_REPEAT`.
+ - Variables in payload strings: `"$NAME$"` alone gives the native typed value; embedded gives text; `$$` is a literal `$`. Undefined variables are errors.
+ - Variable precedence: graph defaults < route `variables` < `runtime`.
+ - Conditions (`if=`): `&& || ! and or not == != < <= > >=`, `in`, `contains`, parentheses, dotted paths. Names resolve from variables, then the `state` option. Unknown values are falsy. No eval. Quote conditions that contain commas or brackets.
+@@ -63,7 +64,7 @@ Pathfinding (always synchronous)
+ 
+ Instructions
+ - `buildInstructions(path, opts)` always async. `buildInstructionsSync(path, opts)` throws `AsyncExtensionError` if a hook returns a promise.
+-- Output: `{ from, to, path, steps: [{ n, from, to, edge, cost, actions: [{ type, data, extensions }], extensions }], cost, extensions, meta }`.
++- Output: `{ from, to, path, steps: [{ n, from, to, edge, cost, actions: [{ type, data, repeat?, extensions }], extensions }], cost, extensions, meta }`.
+ - Options: `variables`, `runtime`, `extensions`, `extensionVariables`, `onError: "throw" | "collect"`, `includeUnresolved`, `strictVariables`.
+ - `isAction(action, "TAP")` narrows the payload type.
+ 
+@@ -85,13 +86,13 @@ Schemas
+ - Redefining an inherited action differently requires listing it in `overrides`.
+ 
+ Runtime (optional, opt in)
+-- `createRuntime({ TAP: handler })`, `runtime.execute(instructions, { context })` async, `executeSync` for sync handlers. Handler options: `timeoutMs`, `retries`, `retryDelayMs`.
++- `createRuntime({ TAP: handler })`, `runtime.execute(instructions, { context })` async, `executeSync` for sync handlers. Handler options: `timeoutMs`, `retries`, `retryDelayMs`. An action with `repeat` runs its handler N times; handlers get `iteration` and `iterations`.
+ 
+ Errors: all extend `AppNavError` with `code`, and `file`, `line`, `column`, `ids` where known. Classes: `ParseError`, `ValidationError`, `SchemaError`, `VariableError`, `ConditionError`, `NoPathError`, `ExtensionError`, `AsyncExtensionError`, `UnknownScreenError`, `ActionHandlerError`, `FileLoadError`.
+ 
+ ## Dynamic registration
+ - Registration changes a live tree in place and returns it. Flags added items `dynamic: true`. One shared tree: `setDefaultTree(tree)` or `indexTreeFromText(text, { setAsDefault: true })`.
+-- `registerScreens([tree,] ids, template?)` clones the template screen as `template:id` and copies the edges touching it. `registerEdges([tree,] edges)`, `registerActions([tree,] screenId, { name: { actions: [...], to?, cost? } })` (every action must be named; the name is the node id). The actions run on the edge into the node, so a route to the node ends with the action; the edge out is empty and costs 0. Also methods on the tree and snake_case aliases (`register_screens`).
++- `registerScreens([tree,] ids, template?)` clones the template screen as `template:id` and copies the edges touching it. `registerEdges([tree,] edges)`, `registerActions([tree,] screenId, { name: { actions: [...], to?, cost? } })` (every action must be named; the name is the node id; an action may carry `repeat`). The actions run on the edge into the node, so a route to the node ends with the action; the edge out is empty and costs 0. Also methods on the tree and snake_case aliases (`register_screens`).
+ - Remove with `unregisterScreens(idOrIdsOrTemplate)`, `unregisterEdges(ids)`, `clearDynamic()`. File screens and edges cannot be removed.
+ - Existing ids are an error by default. `{ onDuplicate: "skip" | "replace" }` changes that (dynamic items only).
+ - `createTree()` makes an empty tree. `cloneTree(tree)` makes an independent copy.
+diff --git a/src/dynamic.ts b/src/dynamic.ts
+index 05dd554..8b2f79e 100644
+--- a/src/dynamic.ts
++++ b/src/dynamic.ts
+@@ -22,6 +22,13 @@ import type { ActionDeclaration, Diagnostic, Edge, JsonObject, Screen, VariableD
+  * only when the whole call succeeds, so a failed call leaves the tree untouched.
+  */
+ 
++/** One action on a registered edge. `repeat` is a whole number of at least 1 or a single `$NAME$` reference. */
++export interface ActionInput {
++  type: string;
++  data?: JsonObject;
++  repeat?: number | string;
++}
++
+ export interface ScreenSpec {
+   id: string;
+   name?: string;
+@@ -41,7 +48,7 @@ export interface EdgeSpec {
+   cost?: number;
+   condition?: string;
+   meta?: JsonObject;
+-  actions?: ReadonlyArray<{ type: string; data?: JsonObject }>;
++  actions?: ReadonlyArray<ActionInput>;
+ }
+ 
+ export interface RegisterOptions extends ValidateOptions {
+@@ -67,7 +74,7 @@ export interface ActionSpec {
+   /** Display name. Defaults to the action's own name. */
+   name?: string;
+   /** Actions performed on the way into the node. */
+-  actions: ReadonlyArray<{ type: string; data?: JsonObject }>;
++  actions: ReadonlyArray<ActionInput>;
+   /** Screen the app is on after the action. Default: the parent screen. */
+   to?: string;
+   /** Cost of the transition into the node, which is where the actions run. Default 1. */
+@@ -212,7 +219,13 @@ function finish(st: Stage, options: RegisterOptions): void {
+ }
+ 
+ function cloneActions(actions: readonly ActionDeclaration[]): ActionDeclaration[] {
+-  return actions.map((a) => ({ type: a.type, data: cloneJson(a.data), line: a.line, column: a.column }));
++  return actions.map((a) => ({
++    type: a.type,
++    data: cloneJson(a.data),
++    ...(a.repeat !== undefined ? { repeat: a.repeat } : {}),
++    line: a.line,
++    column: a.column,
++  }));
+ }
+ 
+ // ---------------------------------------------------------------------------
+@@ -335,7 +348,13 @@ function stageEdges(st: Stage, input: unknown, options: RegisterOptions): void {
+       to: spec.to,
+       cost: spec.cost === undefined ? 1 : spec.cost,
+       condition,
+-      actions: (spec.actions ?? []).map((a) => ({ type: a.type, data: a.data ? cloneJson(a.data) : {} })),
++      actions: (spec.actions ?? []).map(
++        (a): ActionDeclaration => ({
++          type: a.type,
++          data: a.data ? cloneJson(a.data) : {},
++          ...(a.repeat !== undefined ? { repeat: a.repeat } : {}),
++        }),
++      ),
+       meta: spec.meta ? cloneJson(spec.meta) : {},
+       index: st.nextEdge++,
+       dynamic: true,
+diff --git a/src/graph.ts b/src/graph.ts
+index 9860872..43f1e6b 100644
+--- a/src/graph.ts
++++ b/src/graph.ts
+@@ -28,7 +28,7 @@ import type {
+   Screen,
+   VariableDeclaration,
+ } from "./types";
+-import { collectReferences, matchesType, typeOfValue } from "./variables";
++import { collectReferences, matchesType, parseTemplate, typeOfValue } from "./variables";
+ 
+ export interface ValidateOptions {
+   /** Require condition identifiers to be declared VARs. Default false (unknown names are looked up in app state). */
+@@ -154,6 +154,28 @@ export function validateEdgeRecord(
+         if (!env.declarations[name]) err("UNDEFINED_VARIABLE", `Edge "${label}" action ${i + 1} uses undeclared variable "${name}"`, where, [label, name]);
+       }
+     }
++    if (a.repeat !== undefined) {
++      const at = `Edge "${label}" action ${i + 1} (${a.type})`;
++      const r: unknown = a.repeat;
++      if (typeof r === "number") {
++        if (!Number.isInteger(r) || r < 1) err("INVALID_REPEAT", `${at} has invalid repeat ${r}. Repeat must be a whole number of at least 1`, where, [label, a.type]);
++      } else if (typeof r === "string") {
++        const segs = parseTemplate(r);
++        const only = segs.length === 1 && segs[0]?.kind === "var" ? segs[0] : undefined;
++        if (!only) {
++          err("INVALID_REPEAT", `${at} has invalid repeat "${r}". Use a whole number or a single $NAME$ variable reference`, where, [label, a.type]);
++        } else {
++          const decl = env.declarations[only.name];
++          if (!decl) {
++            if (!options.allowUndeclaredVariables) err("UNDEFINED_VARIABLE", `${at} repeat uses undeclared variable "${only.name}"`, where, [label, only.name]);
++          } else if (decl.type !== "number" && decl.type !== "any") {
++            err("INVALID_REPEAT", `${at} repeat variable "${only.name}" is ${decl.type}, expected number`, where, [label, only.name]);
++          }
++        }
++      } else {
++        err("INVALID_REPEAT", `${at} has invalid repeat. Use a whole number of at least 1 or a $NAME$ variable reference`, where, [label, a.type]);
++      }
++    }
+   });
+   return out;
+ }
+diff --git a/src/instructions.ts b/src/instructions.ts
+index 856c6b7..b1ddbc6 100644
+--- a/src/instructions.ts
++++ b/src/instructions.ts
+@@ -1,5 +1,5 @@
+ import { driveAsync, driveSync, type Job } from "./drive";
+-import { AppNavError, ExtensionError, toDiagnostic } from "./errors";
++import { AppNavError, ExtensionError, VariableError, toDiagnostic } from "./errors";
+ import {
+   normalizeExtensions,
+   type AnyExtension,
+@@ -7,13 +7,19 @@ import {
+ } from "./extensions";
+ import { cloneJson, deepFreeze, isThenable, jsonProblem, setOwn } from "./json";
+ import type { Path } from "./pathfinding";
+-import type { DefaultActionMap, Diagnostic, Edge, JsonObject, JsonValue } from "./types";
+-import { buildScope, resolveValue } from "./variables";
++import type { DefaultActionMap, Diagnostic, Edge, JsonObject, JsonValue, VariableDeclaration } from "./types";
++import { buildScope, resolveValue, type VariableScope } from "./variables";
+ 
+ export interface InstructionAction<T extends string = string, D extends JsonObject = JsonObject> {
+   type: T;
+   /** Resolved payload, with all `$VAR$` references substituted. */
+   data: D;
++  /**
++   * How many times to perform the action in a row, as a whole number of at
++   * least 1. Only present when the graph declares a repeat. It is data on the
++   * step, not duplicated steps, so an app can show "x4".
++   */
++  repeat?: number;
+   /** Extension output, keyed by extension name. */
+   extensions: Record<string, JsonValue>;
+   /** Original payload before substitution. Only present with `includeUnresolved`. */
+@@ -67,6 +73,25 @@ type Level = "action" | "step" | "route";
+ 
+ const view = <T extends JsonValue>(v: T): T => deepFreeze(cloneJson(v));
+ 
++/** Resolve a declared repeat (a number or one `$NAME$` reference) to a whole number of at least 1. */
++function resolveRepeat(
++  raw: number | string | undefined,
++  scope: VariableScope,
++  declarations: Readonly<Record<string, VariableDeclaration>>,
++  ids: string[],
++): number | undefined {
++  if (raw === undefined) return undefined;
++  const value = typeof raw === "string" ? resolveValue(raw, scope, declarations, { ids }) : raw;
++  if (typeof value !== "number" || !Number.isInteger(value) || value < 1) {
++    throw new VariableError(
++      `Repeat on ${ids.join(" ")} must be a whole number of at least 1, got ${JSON.stringify(value)}`,
++      { ids },
++      "INVALID_REPEAT",
++    );
++  }
++  return value;
++}
++
+ function* callHook(
+   ext: AnyExtension,
+   level: Level,
+@@ -117,9 +142,11 @@ function* generate(path: Path, options: BuildOptions): Job<Instructions> {
+     edge: edge.id,
+     cost: edge.cost,
+     actions: edge.actions.map((a, ai): InstructionAction => {
++      const repeat = resolveRepeat(a.repeat, scope, tree.variables, [edge.id, a.type]);
+       const action: InstructionAction = {
+         type: a.type,
+         data: resolveValue(a.data, scope, tree.variables, { ids: [edge.id, a.type] }) as JsonObject,
++        ...(repeat !== undefined ? { repeat } : {}),
+         extensions: {},
+       };
+       if (options.includeUnresolved) action.unresolved = cloneJson(a.data);
+diff --git a/src/parser.ts b/src/parser.ts
+index 0a5f7b8..a2da91c 100644
+--- a/src/parser.ts
++++ b/src/parser.ts
+@@ -37,7 +37,7 @@ const KEYWORDS = new Set(["APP", "VAR", "SCREEN", "ACTION", "END", "DO"]);
+  *   var       := "VAR" NAME ":" type ["=" json]
+  *   screen    := "SCREEN" id string [json-object]
+  *   edge      := id "->" id ["[" attr ("," attr)* "]"] ["{" action* "}"]
+- *   action    := "DO" TYPE [json-object]
++ *   action    := "DO" TYPE [json-object] ["repeat" "=" (int | string | "$"NAME"$")]
+  * Comments start with # and run to the end of the line. Whitespace between
+  * tokens is insignificant except that VAR, SCREEN and APP end at a line break.
+  */
+@@ -288,10 +288,39 @@ export function parseGraph(text: string, options: ParseOptions = {}): Graph {
+       const type = readIdent("an action type");
+       skipTrivia();
+       let data: JsonObject = {};
+-      if (peek() === "{") data = readJsonObject();
++      if (peek() === "{") {
++        data = readJsonObject();
++        skipTrivia();
++      }
++      const repeat = peek() === "r" ? readRepeat() : undefined;
+       const loc = locate(typeAt);
+-      actions.push({ type, data, line: loc.line, column: loc.column });
++      actions.push({ type, data, ...(repeat !== undefined ? { repeat } : {}), line: loc.line, column: loc.column });
++    }
++  };
++
++  /**
++   * Reads `repeat=4`, `repeat="$COUNT$"` or `repeat=$COUNT$` after a DO payload.
++   * Whether a number is a usable count is checked by validation, like `cost`.
++   */
++  const readRepeat = (): number | string => {
++    const at = pos;
++    if (readWhile(IDENT_PART) !== "repeat") fail('Expected "DO" or "}" inside an edge block', at, "UNEXPECTED_TOKEN");
++    skipInline();
++    if (peek() !== "=") fail('Expected "=" after "repeat"', pos, "EXPECTED_EQUALS");
++    pos++;
++    skipInline();
++    const valueAt = pos;
++    if (peek() === '"') return readString();
++    const raw = readWhile(/[^\s#}]/);
++    if (/^\$[A-Za-z_][A-Za-z0-9_]*\$$/.test(raw)) return raw;
++    let n: unknown;
++    try {
++      n = JSON.parse(raw);
++    } catch {
++      n = undefined;
+     }
++    if (typeof n !== "number") fail(`repeat must be a whole number or a $NAME$ variable reference, got ${raw === "" ? "nothing" : raw}`, valueAt, "INVALID_REPEAT");
++    return n as number;
+   };
+ 
+   // ---- body ----
+diff --git a/src/runtime.ts b/src/runtime.ts
+index 6c913cb..64e088f 100644
+--- a/src/runtime.ts
++++ b/src/runtime.ts
+@@ -16,6 +16,10 @@ export interface HandlerContext<Ctx = unknown> {
+   /** Caller supplied runtime context (navigation ref, driver, test harness, ...). */
+   readonly context: Ctx;
+   readonly attempt: number;
++  /** 1 based position within the action's repeat count. Always 1 when the action has no `repeat`. */
++  readonly iteration: number;
++  /** The action's repeat count, or 1 when it has none. */
++  readonly iterations: number;
+   readonly signal?: AbortSignal;
+ }
+ 
+@@ -48,6 +52,8 @@ export interface ActionResult {
+   value?: unknown;
+   error?: unknown;
+   attempts: number;
++  /** Only set for actions with a `repeat`: which repetition this result is (1 based). */
++  iteration?: number;
+ }
+ 
+ export interface ExecutionResult {
+@@ -95,70 +101,79 @@ export class Runtime<Ctx = unknown> {
+     for (const step of instructions.steps) {
+       for (let i = 0; i < step.actions.length; i++) {
+         const action = step.actions[i] as InstructionAction;
+-        if (options.signal?.aborted) {
+-          throw new ActionHandlerError("ABORTED", "Execution aborted", [action.type]);
+-        }
+         const reg = this.handlers.get(action.type);
+-        let result: ActionResult;
+-        if (!reg) {
+-          if (options.skipUnhandled) result = { stepN: step.n, actionIndex: i, type: action.type, status: "skipped", attempts: 0 };
+-          else {
+-            result = {
+-              stepN: step.n,
+-              actionIndex: i,
+-              type: action.type,
+-              status: "error",
+-              error: new ActionHandlerError("NO_HANDLER", `No handler registered for action "${action.type}"`, [action.type]),
+-              attempts: 0,
+-            };
++        // An action with a `repeat` runs that many times in a row. A failed
++        // repetition ends the run of that action, so it is never retried blindly.
++        const iterations = reg ? Math.max(1, action.repeat ?? 1) : 1;
++        for (let iteration = 1; iteration <= iterations; iteration++) {
++          if (options.signal?.aborted) {
++            throw new ActionHandlerError("ABORTED", "Execution aborted", [action.type]);
+           }
+-        } else {
+-          const maxAttempts = 1 + Math.max(0, reg.options.retries ?? 0);
+-          let attempts = 0;
+-          result = { stepN: step.n, actionIndex: i, type: action.type, status: "error", attempts: 0 };
+-          while (attempts < maxAttempts) {
+-            attempts++;
+-            try {
+-              let value: unknown = (reg.handler as ActionHandler<Ctx>)({
+-                action,
+-                step,
+-                instructions,
+-                context: options.context as Ctx,
+-                attempt: attempts,
+-                signal: options.signal,
+-              });
+-              if (isThenable(value)) {
+-                if (!allowAsync) {
+-                  yield { promise: value, what: `Handler for "${action.type}"` };
++          const tag = action.repeat === undefined ? {} : { iteration };
++          let result: ActionResult;
++          if (!reg) {
++            if (options.skipUnhandled) result = { stepN: step.n, actionIndex: i, type: action.type, status: "skipped", attempts: 0 };
++            else {
++              result = {
++                stepN: step.n,
++                actionIndex: i,
++                type: action.type,
++                status: "error",
++                error: new ActionHandlerError("NO_HANDLER", `No handler registered for action "${action.type}"`, [action.type]),
++                attempts: 0,
++              };
++            }
++          } else {
++            const maxAttempts = 1 + Math.max(0, reg.options.retries ?? 0);
++            let attempts = 0;
++            result = { stepN: step.n, actionIndex: i, type: action.type, status: "error", attempts: 0, ...tag };
++            while (attempts < maxAttempts) {
++              attempts++;
++              try {
++                let value: unknown = (reg.handler as ActionHandler<Ctx>)({
++                  action,
++                  step,
++                  instructions,
++                  context: options.context as Ctx,
++                  attempt: attempts,
++                  iteration,
++                  iterations,
++                  signal: options.signal,
++                });
++                if (isThenable(value)) {
++                  if (!allowAsync) {
++                    yield { promise: value, what: `Handler for "${action.type}"` };
++                  }
++                  const timeout = reg.options.timeoutMs;
++                  const pending: PromiseLike<unknown> =
++                    timeout === undefined
++                      ? value
++                      : Promise.race([
++                          value,
++                          new Promise((_, rej) =>
++                            setTimeout(() => rej(new ActionHandlerError("TIMEOUT", `Handler for "${action.type}" timed out after ${timeout}ms`, [action.type])), timeout),
++                          ),
++                        ]);
++                  value = yield { promise: pending, what: `Handler for "${action.type}"` };
++                }
++                result = { stepN: step.n, actionIndex: i, type: action.type, status: "ok", value, attempts, ...tag };
++                break;
++              } catch (e) {
++                if (e instanceof AppNavError && e.code === "ASYNC_IN_SYNC") throw e;
++                result = { stepN: step.n, actionIndex: i, type: action.type, status: "error", error: e, attempts, ...tag };
++                if (attempts < maxAttempts && allowAsync && reg.options.retryDelayMs) {
++                  yield { promise: sleep(reg.options.retryDelayMs), what: "retry delay" };
+                 }
+-                const timeout = reg.options.timeoutMs;
+-                const pending: PromiseLike<unknown> =
+-                  timeout === undefined
+-                    ? value
+-                    : Promise.race([
+-                        value,
+-                        new Promise((_, rej) =>
+-                          setTimeout(() => rej(new ActionHandlerError("TIMEOUT", `Handler for "${action.type}" timed out after ${timeout}ms`, [action.type])), timeout),
+-                        ),
+-                      ]);
+-                value = yield { promise: pending, what: `Handler for "${action.type}"` };
+-              }
+-              result = { stepN: step.n, actionIndex: i, type: action.type, status: "ok", value, attempts };
+-              break;
+-            } catch (e) {
+-              if (e instanceof AppNavError && e.code === "ASYNC_IN_SYNC") throw e;
+-              result = { stepN: step.n, actionIndex: i, type: action.type, status: "error", error: e, attempts };
+-              if (attempts < maxAttempts && allowAsync && reg.options.retryDelayMs) {
+-                yield { promise: sleep(reg.options.retryDelayMs), what: "retry delay" };
+               }
+             }
+           }
+-        }
+-        results.push(result);
+-        options.onAction?.(result, step);
+-        if (result.status === "error") {
+-          ok = false;
+-          if (!options.continueOnError) return { ok, results };
++          results.push(result);
++          options.onAction?.(result, step);
++          if (result.status === "error") {
++            ok = false;
++            if (!options.continueOnError) return { ok, results };
++            break;
++          }
+         }
+       }
+     }
+diff --git a/src/types.ts b/src/types.ts
+index d3271ce..16d3202 100644
+--- a/src/types.ts
++++ b/src/types.ts
+@@ -64,6 +64,12 @@ export interface Screen {
+ export interface ActionDeclaration {
+   readonly type: string;
+   readonly data: JsonObject;
++  /**
++   * How many times the app performs the action in a row. A whole number of at
++   * least 1, or a single `$NAME$` reference resolved when instructions are built.
++   * Kept next to `data` so action payload schemas are not affected.
++   */
++  readonly repeat?: number | string;
+   readonly line?: number;
+   readonly column?: number;
+ }
+diff --git a/tests/repeat.test.ts b/tests/repeat.test.ts
+new file mode 100644
+index 0000000..8c5032e
+--- /dev/null
++++ b/tests/repeat.test.ts
+@@ -0,0 +1,248 @@
++import { describe, expect, it } from "vitest";
++import {
++  ParseError,
++  ValidationError,
++  VariableError,
++  buildInstructionsSync,
++  calculatePath,
++  createRuntime,
++  defineExtension,
++  indexTreeFromText,
++  parseGraph,
++} from "../src";
++
++const wrap = (body: string) => `NAVGRAPH/2\n${body}\n`;
++
++const GRAPH = `NAVGRAPH/2
++VAR EXTRA_QUANTITY : number
++SCREEN cart "Cart"
++SCREEN tutorial "Tutorial"
++ACTION decrease_quantity "Reduce quantity"
++cart -> decrease_quantity { DO TAP { "target": "Reduce Quantity" } repeat=$EXTRA_QUANTITY$ }
++decrease_quantity -> cart
++cart -> tutorial { DO TAP { "target": "Next" } }
++END`;
++
++const build = (variables: Record<string, number> = {}) =>
++  buildInstructionsSync(calculatePath(parsedTree, "cart", "decrease_quantity", "astar", { variables }));
++const parsedTree = indexTreeFromText(GRAPH);
++
++const codes = (text: string) => indexTreeFromText(text, { diagnostics: "collect" }).diagnostics.map((d) => d.code);
++
++describe("repeat in graph files", () => {
++  it("parses a number, a quoted reference and a bare reference", () => {
++    const g = parseGraph(
++      wrap(
++        `SCREEN a "A"\nSCREEN b "B"\n` +
++          `a -> b { DO TAP { "target": "x" } repeat=4\n  DO TAP { "target": "y" } repeat="$N$"\n  DO TAP { "target": "z" } repeat=$N$ }`,
++      ),
++    );
++    expect(g.edges[0]?.actions.map((a) => a.repeat)).toEqual([4, "$N$", "$N$"]);
++  });
++
++  it("works without a payload, directly before a closing brace, and leaves other actions alone", () => {
++    const g = parseGraph(wrap(`SCREEN a "A"\nSCREEN b "B"\na -> b { DO BACK repeat=2 DO WAIT { "durationMs": 5 } DO TAP { "target": "t" } repeat=3}`));
++    const actions = g.edges[0]?.actions ?? [];
++    expect(actions.map((a) => a.type)).toEqual(["BACK", "WAIT", "TAP"]);
++    expect(actions.map((a) => a.repeat)).toEqual([2, undefined, 3]);
++    expect("repeat" in (actions[1] ?? {})).toBe(false);
++  });
++
++  it("reports malformed repeats with a position", () => {
++    const bad = (value: string) => () => parseGraph(wrap(`SCREEN a "A"\na -> a { DO TAP { "target": "t" } ${value} }`));
++    expect(bad("repeat=abc")).toThrow(ParseError);
++    expect(bad("repeat=abc")).toThrow(/whole number or a \$NAME\$/);
++    expect(bad("repeat=")).toThrow(/got nothing/);
++    expect(bad("repeat 4")).toThrow(/Expected "="/);
++    try {
++      bad("repeat=abc")();
++    } catch (e) {
++      expect((e as ParseError).code).toBe("INVALID_REPEAT");
++      expect((e as ParseError).line).toBe(3);
++    }
++  });
++});
++
++describe("repeat validation", () => {
++  const withRepeat = (repeat: string) =>
++    `NAVGRAPH/2\nVAR N : number\nVAR S : string = "x"\nVAR ANY : any\nSCREEN a "A"\na -> a { DO TAP { "target": "t" } repeat=${repeat} }`;
++
++  it("accepts whole numbers of at least 1 and number or any variables", () => {
++    expect(codes(withRepeat("1"))).toEqual([]);
++    expect(codes(withRepeat("12"))).toEqual([]);
++    expect(codes(withRepeat("$N$"))).toEqual([]);
++    expect(codes(withRepeat('"$ANY$"'))).toEqual([]);
++  });
++
++  it("rejects zero, negatives and fractions", () => {
++    for (const bad of ["0", "-1", "2.5"]) expect(codes(withRepeat(bad)), bad).toEqual(["INVALID_REPEAT"]);
++  });
++
++  it("rejects text and mixed templates", () => {
++    expect(codes(withRepeat('"two"'))).toEqual(["INVALID_REPEAT"]);
++    expect(codes(withRepeat('"x$N$"'))).toEqual(["INVALID_REPEAT"]);
++  });
++
++  it("checks the variable is declared and numeric", () => {
++    expect(codes(withRepeat("$GHOST$"))).toEqual(["UNDEFINED_VARIABLE"]);
++    expect(codes(withRepeat("$S$"))).toEqual(["INVALID_REPEAT"]);
++    expect(() => indexTreeFromText(withRepeat("0"))).toThrow(ValidationError);
++  });
++});
++
++describe("repeat in instructions", () => {
++  it("keeps a literal repeat as data on the action instead of duplicating the step", () => {
++    const tree = indexTreeFromText(wrap(`SCREEN a "A"\nSCREEN b "B"\na -> b { DO TAP { "target": "Reduce" } repeat=4 }`));
++    const out = buildInstructionsSync(calculatePath(tree, "a", "b"));
++    expect(out.steps).toHaveLength(1);
++    expect(out.steps[0]?.actions).toHaveLength(1);
++    expect(out.steps[0]?.actions[0]?.repeat).toBe(4);
++    expect(JSON.parse(JSON.stringify(out))).toEqual(out);
++  });
++
++  it("leaves repeat off actions that do not declare one", () => {
++    const out = buildInstructionsSync(calculatePath(parsedTree, "cart", "tutorial"));
++    expect("repeat" in (out.steps[0]?.actions[0] ?? {})).toBe(false);
++  });
++
++  it("resolves a variable repeat from the route variables", () => {
++    const out = build({ EXTRA_QUANTITY: 4 });
++    expect(out.path).toEqual(["cart", "decrease_quantity"]);
++    expect(out.steps[0]?.actions[0]).toMatchObject({ type: "TAP", data: { target: "Reduce Quantity" }, repeat: 4 });
++  });
++
++  it("lets build options override the route variables, and runtime values win", () => {
++    const path = calculatePath(parsedTree, "cart", "decrease_quantity", "astar", { variables: { EXTRA_QUANTITY: 4 } });
++    expect(buildInstructionsSync(path, { variables: { EXTRA_QUANTITY: 2 } }).steps[0]?.actions[0]?.repeat).toBe(2);
++    expect(buildInstructionsSync(path, { runtime: { EXTRA_QUANTITY: 7 } }).steps[0]?.actions[0]?.repeat).toBe(7);
++  });
++
++  it("fails when the variable has no value", () => {
++    expect(() => build()).toThrow(VariableError);
++    expect(() => build()).toThrow(/required but no value/);
++  });
++
++  it("rejects a resolved value that is not a whole number of at least 1", () => {
++    for (const bad of [0, -2, 2.5]) {
++      let error: unknown;
++      try {
++        build({ EXTRA_QUANTITY: bad });
++      } catch (e) {
++        error = e;
++      }
++      expect(error, String(bad)).toBeInstanceOf(VariableError);
++      expect((error as VariableError).code).toBe("INVALID_REPEAT");
++      expect((error as VariableError).message).toMatch(/whole number of at least 1/);
++    }
++  });
++
++  it("is visible to extensions", () => {
++    const seen = defineExtension({ name: "seen", run: ({ action }) => ({ repeat: action.repeat ?? 1 }) });
++    const path = calculatePath(parsedTree, "cart", "decrease_quantity", "astar", { variables: { EXTRA_QUANTITY: 3 } });
++    expect(buildInstructionsSync(path, { extensions: [seen] }).steps[0]?.actions[0]?.extensions).toEqual({ seen: { repeat: 3 } });
++  });
++
++  it("does not change the cost, which belongs to the edge", () => {
++    expect(build({ EXTRA_QUANTITY: 9 }).cost).toBe(build({ EXTRA_QUANTITY: 1 }).cost);
++  });
++});
++
++describe("repeat in registered actions", () => {
++  const swipe = { type: "SWIPE", data: { direction: "left" }, repeat: 3 };
++
++  it("registerActions carries repeat onto the edge into the node", () => {
++    const tree = indexTreeFromText(wrap(`SCREEN cart "Cart"`));
++    tree.registerActions("cart", { remove_item: { actions: [swipe] } });
++    expect(tree.edge("cart->remove_item")?.actions[0]?.repeat).toBe(3);
++    expect(buildInstructionsSync(calculatePath(tree, "cart", "remove_item")).steps[0]?.actions[0]?.repeat).toBe(3);
++  });
++
++  it("registerActions accepts a variable the app fills in at planning time", () => {
++    const tree = indexTreeFromText(`NAVGRAPH/2\nVAR EXTRA_QUANTITY : number\nSCREEN cart "Cart"\nEND`);
++    tree.registerActions("cart", {
++      decrease_quantity: { actions: [{ type: "TAP", data: { target: "Reduce Quantity" }, repeat: "$EXTRA_QUANTITY$" }] },
++    });
++    const path = calculatePath(tree, "cart", "decrease_quantity", "astar", { variables: { EXTRA_QUANTITY: 4 } });
++    expect(buildInstructionsSync(path).steps[0]?.actions[0]?.repeat).toBe(4);
++  });
++
++  it("rejects bad repeats at registration and leaves the tree unchanged", () => {
++    const tree = indexTreeFromText(wrap(`SCREEN cart "Cart"`));
++    const edges = tree.edges.length;
++    for (const repeat of [0, 1.5, "$GHOST$", "many"]) {
++      let error: unknown;
++      try {
++        tree.registerActions("cart", { bad: { actions: [{ type: "TAP", data: { target: "t" }, repeat }] } });
++      } catch (e) {
++        error = e;
++      }
++      expect(error, String(repeat)).toBeInstanceOf(ValidationError);
++    }
++    expect(tree.edges.length).toBe(edges);
++    expect(tree.hasScreen("bad")).toBe(false);
++  });
++
++  it("registerEdges validates repeat the same way", () => {
++    const tree = indexTreeFromText(wrap(`SCREEN a "A"\nSCREEN b "B"`));
++    expect(() => tree.registerEdges([{ from: "a", to: "b", actions: [{ type: "BACK", repeat: 0 }] }])).toThrow(/INVALID_REPEAT|invalid repeat/);
++    tree.registerEdges([{ from: "a", to: "b", actions: [{ type: "BACK", repeat: 2 }] }]);
++    expect(tree.edge("a->b")?.actions[0]?.repeat).toBe(2);
++  });
++
++  it("template copies keep the repeat of the edges they clone", () => {
++    const tree = indexTreeFromText(wrap(`SCREEN list "List"\nSCREEN row "Row"\nlist -> row { DO TAP { "target": "Row" } repeat=2 }\nrow -> list`));
++    tree.registerScreens(["a"], "row");
++    expect(tree.edge("list->row:a")?.actions[0]?.repeat).toBe(2);
++  });
++});
++
++describe("repeat in the runtime", () => {
++  const instr = build({ EXTRA_QUANTITY: 3 });
++
++  it("runs a handler once per repetition and tells it which one it is", async () => {
++    const calls: string[] = [];
++    const rt = createRuntime({ TAP: ({ iteration, iterations }) => calls.push(`${iteration}/${iterations}`) });
++    const res = await rt.execute(instr);
++    expect(res.ok).toBe(true);
++    expect(calls).toEqual(["1/3", "2/3", "3/3"]);
++    expect(res.results.map((r) => r.iteration)).toEqual([1, 2, 3]);
++    expect(res.results.every((r) => r.status === "ok" && r.stepN === 1 && r.actionIndex === 0)).toBe(true);
++  });
++
++  it("works with the synchronous executor", () => {
++    let n = 0;
++    const res = createRuntime({ TAP: () => ++n }).executeSync(instr);
++    expect(n).toBe(3);
++    expect(res.results).toHaveLength(3);
++  });
++
++  it("runs actions without a repeat once and adds no iteration to their results", async () => {
++    const plain = buildInstructionsSync(calculatePath(parsedTree, "cart", "tutorial"));
++    const seen: Array<[number, number]> = [];
++    const res = await createRuntime({ TAP: ({ iteration, iterations }) => seen.push([iteration, iterations]) }).execute(plain);
++    expect(seen).toEqual([[1, 1]]);
++    expect("iteration" in (res.results[0] ?? {})).toBe(false);
++  });
++
++  it("stops repeating an action after a failed repetition", async () => {
++    let n = 0;
++    const rt = createRuntime({
++      TAP: () => {
++        if (++n === 2) throw new Error("boom");
++      },
++    });
++    const stop = await rt.execute(instr);
++    expect(stop.ok).toBe(false);
++    expect(stop.results.map((r) => r.status)).toEqual(["ok", "error"]);
++    n = 0;
++    const cont = await rt.execute(instr, { continueOnError: true });
++    expect(cont.results.map((r) => r.status)).toEqual(["ok", "error"]);
++    expect(n).toBe(2);
++  });
++
++  it("reports a missing handler once, not once per repetition", async () => {
++    const res = await createRuntime({}).execute(instr, { continueOnError: true });
++    expect(res.results).toHaveLength(1);
++    expect(res.results[0]?.status).toBe("error");
++  });
++});
+-- 
+2.43.0
+

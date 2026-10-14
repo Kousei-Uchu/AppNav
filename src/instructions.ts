@@ -1,5 +1,5 @@
 import { driveAsync, driveSync, type Job } from "./drive";
-import { AppNavError, ExtensionError, toDiagnostic } from "./errors";
+import { AppNavError, ExtensionError, VariableError, toDiagnostic } from "./errors";
 import {
   normalizeExtensions,
   type AnyExtension,
@@ -7,13 +7,19 @@ import {
 } from "./extensions";
 import { cloneJson, deepFreeze, isThenable, jsonProblem, setOwn } from "./json";
 import type { Path } from "./pathfinding";
-import type { DefaultActionMap, Diagnostic, Edge, JsonObject, JsonValue } from "./types";
-import { buildScope, resolveValue } from "./variables";
+import type { DefaultActionMap, Diagnostic, Edge, JsonObject, JsonValue, VariableDeclaration } from "./types";
+import { buildScope, resolveValue, type VariableScope } from "./variables";
 
 export interface InstructionAction<T extends string = string, D extends JsonObject = JsonObject> {
   type: T;
   /** Resolved payload, with all `$VAR$` references substituted. */
   data: D;
+  /**
+   * How many times to perform the action in a row, as a whole number of at
+   * least 1. Only present when the graph declares a repeat. It is data on the
+   * step, not duplicated steps, so an app can show "x4".
+   */
+  repeat?: number;
   /** Extension output, keyed by extension name. */
   extensions: Record<string, JsonValue>;
   /** Original payload before substitution. Only present with `includeUnresolved`. */
@@ -67,6 +73,25 @@ type Level = "action" | "step" | "route";
 
 const view = <T extends JsonValue>(v: T): T => deepFreeze(cloneJson(v));
 
+/** Resolve a declared repeat (a number or one `$NAME$` reference) to a whole number of at least 1. */
+function resolveRepeat(
+  raw: number | string | undefined,
+  scope: VariableScope,
+  declarations: Readonly<Record<string, VariableDeclaration>>,
+  ids: string[],
+): number | undefined {
+  if (raw === undefined) return undefined;
+  const value = typeof raw === "string" ? resolveValue(raw, scope, declarations, { ids }) : raw;
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 1) {
+    throw new VariableError(
+      `Repeat on ${ids.join(" ")} must be a whole number of at least 1, got ${JSON.stringify(value)}`,
+      { ids },
+      "INVALID_REPEAT",
+    );
+  }
+  return value;
+}
+
 function* callHook(
   ext: AnyExtension,
   level: Level,
@@ -117,9 +142,11 @@ function* generate(path: Path, options: BuildOptions): Job<Instructions> {
     edge: edge.id,
     cost: edge.cost,
     actions: edge.actions.map((a, ai): InstructionAction => {
+      const repeat = resolveRepeat(a.repeat, scope, tree.variables, [edge.id, a.type]);
       const action: InstructionAction = {
         type: a.type,
         data: resolveValue(a.data, scope, tree.variables, { ids: [edge.id, a.type] }) as JsonObject,
+        ...(repeat !== undefined ? { repeat } : {}),
         extensions: {},
       };
       if (options.includeUnresolved) action.unresolved = cloneJson(a.data);

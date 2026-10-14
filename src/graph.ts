@@ -28,7 +28,7 @@ import type {
   Screen,
   VariableDeclaration,
 } from "./types";
-import { collectReferences, matchesType, typeOfValue } from "./variables";
+import { collectReferences, matchesType, parseTemplate, typeOfValue } from "./variables";
 
 export interface ValidateOptions {
   /** Require condition identifiers to be declared VARs. Default false (unknown names are looked up in app state). */
@@ -152,6 +152,28 @@ export function validateEdgeRecord(
     if (!options.allowUndeclaredVariables) {
       for (const name of collectReferences(a.data)) {
         if (!env.declarations[name]) err("UNDEFINED_VARIABLE", `Edge "${label}" action ${i + 1} uses undeclared variable "${name}"`, where, [label, name]);
+      }
+    }
+    if (a.repeat !== undefined) {
+      const at = `Edge "${label}" action ${i + 1} (${a.type})`;
+      const r: unknown = a.repeat;
+      if (typeof r === "number") {
+        if (!Number.isInteger(r) || r < 1) err("INVALID_REPEAT", `${at} has invalid repeat ${r}. Repeat must be a whole number of at least 1`, where, [label, a.type]);
+      } else if (typeof r === "string") {
+        const segs = parseTemplate(r);
+        const only = segs.length === 1 && segs[0]?.kind === "var" ? segs[0] : undefined;
+        if (!only) {
+          err("INVALID_REPEAT", `${at} has invalid repeat "${r}". Use a whole number or a single $NAME$ variable reference`, where, [label, a.type]);
+        } else {
+          const decl = env.declarations[only.name];
+          if (!decl) {
+            if (!options.allowUndeclaredVariables) err("UNDEFINED_VARIABLE", `${at} repeat uses undeclared variable "${only.name}"`, where, [label, only.name]);
+          } else if (decl.type !== "number" && decl.type !== "any") {
+            err("INVALID_REPEAT", `${at} repeat variable "${only.name}" is ${decl.type}, expected number`, where, [label, only.name]);
+          }
+        }
+      } else {
+        err("INVALID_REPEAT", `${at} has invalid repeat. Use a whole number of at least 1 or a $NAME$ variable reference`, where, [label, a.type]);
       }
     }
   });

@@ -16,6 +16,10 @@ export interface HandlerContext<Ctx = unknown> {
   /** Caller supplied runtime context (navigation ref, driver, test harness, ...). */
   readonly context: Ctx;
   readonly attempt: number;
+  /** 1 based position within the action's repeat count. Always 1 when the action has no `repeat`. */
+  readonly iteration: number;
+  /** The action's repeat count, or 1 when it has none. */
+  readonly iterations: number;
   readonly signal?: AbortSignal;
 }
 
@@ -48,6 +52,8 @@ export interface ActionResult {
   value?: unknown;
   error?: unknown;
   attempts: number;
+  /** Only set for actions with a `repeat`: which repetition this result is (1 based). */
+  iteration?: number;
 }
 
 export interface ExecutionResult {
@@ -95,70 +101,79 @@ export class Runtime<Ctx = unknown> {
     for (const step of instructions.steps) {
       for (let i = 0; i < step.actions.length; i++) {
         const action = step.actions[i] as InstructionAction;
-        if (options.signal?.aborted) {
-          throw new ActionHandlerError("ABORTED", "Execution aborted", [action.type]);
-        }
         const reg = this.handlers.get(action.type);
-        let result: ActionResult;
-        if (!reg) {
-          if (options.skipUnhandled) result = { stepN: step.n, actionIndex: i, type: action.type, status: "skipped", attempts: 0 };
-          else {
-            result = {
-              stepN: step.n,
-              actionIndex: i,
-              type: action.type,
-              status: "error",
-              error: new ActionHandlerError("NO_HANDLER", `No handler registered for action "${action.type}"`, [action.type]),
-              attempts: 0,
-            };
+        // An action with a `repeat` runs that many times in a row. A failed
+        // repetition ends the run of that action, so it is never retried blindly.
+        const iterations = reg ? Math.max(1, action.repeat ?? 1) : 1;
+        for (let iteration = 1; iteration <= iterations; iteration++) {
+          if (options.signal?.aborted) {
+            throw new ActionHandlerError("ABORTED", "Execution aborted", [action.type]);
           }
-        } else {
-          const maxAttempts = 1 + Math.max(0, reg.options.retries ?? 0);
-          let attempts = 0;
-          result = { stepN: step.n, actionIndex: i, type: action.type, status: "error", attempts: 0 };
-          while (attempts < maxAttempts) {
-            attempts++;
-            try {
-              let value: unknown = (reg.handler as ActionHandler<Ctx>)({
-                action,
-                step,
-                instructions,
-                context: options.context as Ctx,
-                attempt: attempts,
-                signal: options.signal,
-              });
-              if (isThenable(value)) {
-                if (!allowAsync) {
-                  yield { promise: value, what: `Handler for "${action.type}"` };
+          const tag = action.repeat === undefined ? {} : { iteration };
+          let result: ActionResult;
+          if (!reg) {
+            if (options.skipUnhandled) result = { stepN: step.n, actionIndex: i, type: action.type, status: "skipped", attempts: 0 };
+            else {
+              result = {
+                stepN: step.n,
+                actionIndex: i,
+                type: action.type,
+                status: "error",
+                error: new ActionHandlerError("NO_HANDLER", `No handler registered for action "${action.type}"`, [action.type]),
+                attempts: 0,
+              };
+            }
+          } else {
+            const maxAttempts = 1 + Math.max(0, reg.options.retries ?? 0);
+            let attempts = 0;
+            result = { stepN: step.n, actionIndex: i, type: action.type, status: "error", attempts: 0, ...tag };
+            while (attempts < maxAttempts) {
+              attempts++;
+              try {
+                let value: unknown = (reg.handler as ActionHandler<Ctx>)({
+                  action,
+                  step,
+                  instructions,
+                  context: options.context as Ctx,
+                  attempt: attempts,
+                  iteration,
+                  iterations,
+                  signal: options.signal,
+                });
+                if (isThenable(value)) {
+                  if (!allowAsync) {
+                    yield { promise: value, what: `Handler for "${action.type}"` };
+                  }
+                  const timeout = reg.options.timeoutMs;
+                  const pending: PromiseLike<unknown> =
+                    timeout === undefined
+                      ? value
+                      : Promise.race([
+                          value,
+                          new Promise((_, rej) =>
+                            setTimeout(() => rej(new ActionHandlerError("TIMEOUT", `Handler for "${action.type}" timed out after ${timeout}ms`, [action.type])), timeout),
+                          ),
+                        ]);
+                  value = yield { promise: pending, what: `Handler for "${action.type}"` };
                 }
-                const timeout = reg.options.timeoutMs;
-                const pending: PromiseLike<unknown> =
-                  timeout === undefined
-                    ? value
-                    : Promise.race([
-                        value,
-                        new Promise((_, rej) =>
-                          setTimeout(() => rej(new ActionHandlerError("TIMEOUT", `Handler for "${action.type}" timed out after ${timeout}ms`, [action.type])), timeout),
-                        ),
-                      ]);
-                value = yield { promise: pending, what: `Handler for "${action.type}"` };
-              }
-              result = { stepN: step.n, actionIndex: i, type: action.type, status: "ok", value, attempts };
-              break;
-            } catch (e) {
-              if (e instanceof AppNavError && e.code === "ASYNC_IN_SYNC") throw e;
-              result = { stepN: step.n, actionIndex: i, type: action.type, status: "error", error: e, attempts };
-              if (attempts < maxAttempts && allowAsync && reg.options.retryDelayMs) {
-                yield { promise: sleep(reg.options.retryDelayMs), what: "retry delay" };
+                result = { stepN: step.n, actionIndex: i, type: action.type, status: "ok", value, attempts, ...tag };
+                break;
+              } catch (e) {
+                if (e instanceof AppNavError && e.code === "ASYNC_IN_SYNC") throw e;
+                result = { stepN: step.n, actionIndex: i, type: action.type, status: "error", error: e, attempts, ...tag };
+                if (attempts < maxAttempts && allowAsync && reg.options.retryDelayMs) {
+                  yield { promise: sleep(reg.options.retryDelayMs), what: "retry delay" };
+                }
               }
             }
           }
-        }
-        results.push(result);
-        options.onAction?.(result, step);
-        if (result.status === "error") {
-          ok = false;
-          if (!options.continueOnError) return { ok, results };
+          results.push(result);
+          options.onAction?.(result, step);
+          if (result.status === "error") {
+            ok = false;
+            if (!options.continueOnError) return { ok, results };
+            break;
+          }
         }
       }
     }

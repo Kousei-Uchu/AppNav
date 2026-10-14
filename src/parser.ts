@@ -37,7 +37,7 @@ const KEYWORDS = new Set(["APP", "VAR", "SCREEN", "ACTION", "END", "DO"]);
  *   var       := "VAR" NAME ":" type ["=" json]
  *   screen    := "SCREEN" id string [json-object]
  *   edge      := id "->" id ["[" attr ("," attr)* "]"] ["{" action* "}"]
- *   action    := "DO" TYPE [json-object]
+ *   action    := "DO" TYPE [json-object] ["repeat" "=" (int | string | "$"NAME"$")]
  * Comments start with # and run to the end of the line. Whitespace between
  * tokens is insignificant except that VAR, SCREEN and APP end at a line break.
  */
@@ -288,10 +288,39 @@ export function parseGraph(text: string, options: ParseOptions = {}): Graph {
       const type = readIdent("an action type");
       skipTrivia();
       let data: JsonObject = {};
-      if (peek() === "{") data = readJsonObject();
+      if (peek() === "{") {
+        data = readJsonObject();
+        skipTrivia();
+      }
+      const repeat = peek() === "r" ? readRepeat() : undefined;
       const loc = locate(typeAt);
-      actions.push({ type, data, line: loc.line, column: loc.column });
+      actions.push({ type, data, ...(repeat !== undefined ? { repeat } : {}), line: loc.line, column: loc.column });
     }
+  };
+
+  /**
+   * Reads `repeat=4`, `repeat="$COUNT$"` or `repeat=$COUNT$` after a DO payload.
+   * Whether a number is a usable count is checked by validation, like `cost`.
+   */
+  const readRepeat = (): number | string => {
+    const at = pos;
+    if (readWhile(IDENT_PART) !== "repeat") fail('Expected "DO" or "}" inside an edge block', at, "UNEXPECTED_TOKEN");
+    skipInline();
+    if (peek() !== "=") fail('Expected "=" after "repeat"', pos, "EXPECTED_EQUALS");
+    pos++;
+    skipInline();
+    const valueAt = pos;
+    if (peek() === '"') return readString();
+    const raw = readWhile(/[^\s#}]/);
+    if (/^\$[A-Za-z_][A-Za-z0-9_]*\$$/.test(raw)) return raw;
+    let n: unknown;
+    try {
+      n = JSON.parse(raw);
+    } catch {
+      n = undefined;
+    }
+    if (typeof n !== "number") fail(`repeat must be a whole number or a $NAME$ variable reference, got ${raw === "" ? "nothing" : raw}`, valueAt, "INVALID_REPEAT");
+    return n as number;
   };
 
   // ---- body ----

@@ -43,6 +43,7 @@ Rules:
 - Edges are directed. Never assume a reverse edge. Cost belongs to the edge, not the action count. Default cost 1.
 - Edge ids default to `src->dst` (`#2`, `#3` for repeats) unless `id=` is given.
 - `DO TYPE {json}`: TYPE must exist in the schema. Default actions: TAP, LONG_PRESS, TYPE, SWIPE, SCROLL, BACK, WAIT, SET_STATE, ASSERT.
+- `DO TAP {json} repeat=4` or `repeat=$COUNT$` means "do it N times in a row". N is a whole number >= 1 or a `number` variable. Output keeps one action with `repeat: N`; never duplicate `DO` lines for this. Bad counts are `INVALID_REPEAT`.
 - Variables in payload strings: `"$NAME$"` alone gives the native typed value; embedded gives text; `$$` is a literal `$`. Undefined variables are errors.
 - Variable precedence: graph defaults < route `variables` < `runtime`.
 - Conditions (`if=`): `&& || ! and or not == != < <= > >=`, `in`, `contains`, parentheses, dotted paths. Names resolve from variables, then the `state` option. Unknown values are falsy. No eval. Quote conditions that contain commas or brackets.
@@ -63,7 +64,7 @@ Pathfinding (always synchronous)
 
 Instructions
 - `buildInstructions(path, opts)` always async. `buildInstructionsSync(path, opts)` throws `AsyncExtensionError` if a hook returns a promise.
-- Output: `{ from, to, path, steps: [{ n, from, to, edge, cost, actions: [{ type, data, extensions }], extensions }], cost, extensions, meta }`.
+- Output: `{ from, to, path, steps: [{ n, from, to, edge, cost, actions: [{ type, data, repeat?, extensions }], extensions }], cost, extensions, meta }`.
 - Options: `variables`, `runtime`, `extensions`, `extensionVariables`, `onError: "throw" | "collect"`, `includeUnresolved`, `strictVariables`.
 - `isAction(action, "TAP")` narrows the payload type.
 
@@ -85,13 +86,13 @@ Schemas
 - Redefining an inherited action differently requires listing it in `overrides`.
 
 Runtime (optional, opt in)
-- `createRuntime({ TAP: handler })`, `runtime.execute(instructions, { context })` async, `executeSync` for sync handlers. Handler options: `timeoutMs`, `retries`, `retryDelayMs`.
+- `createRuntime({ TAP: handler })`, `runtime.execute(instructions, { context })` async, `executeSync` for sync handlers. Handler options: `timeoutMs`, `retries`, `retryDelayMs`. An action with `repeat` runs its handler N times; handlers get `iteration` and `iterations`.
 
 Errors: all extend `AppNavError` with `code`, and `file`, `line`, `column`, `ids` where known. Classes: `ParseError`, `ValidationError`, `SchemaError`, `VariableError`, `ConditionError`, `NoPathError`, `ExtensionError`, `AsyncExtensionError`, `UnknownScreenError`, `ActionHandlerError`, `FileLoadError`.
 
 ## Dynamic registration
 - Registration changes a live tree in place and returns it. Flags added items `dynamic: true`. One shared tree: `setDefaultTree(tree)` or `indexTreeFromText(text, { setAsDefault: true })`.
-- `registerScreens([tree,] ids, template?)` clones the template screen as `template:id` and copies the edges touching it. `registerEdges([tree,] edges)`, `registerActions([tree,] screenId, { name: { actions: [...], to?, cost? } })` (every action must be named; the name is the node id). The actions run on the edge into the node, so a route to the node ends with the action; the edge out is empty and costs 0. Also methods on the tree and snake_case aliases (`register_screens`).
+- `registerScreens([tree,] ids, template?)` clones the template screen as `template:id` and copies the edges touching it. `registerEdges([tree,] edges)`, `registerActions([tree,] screenId, { name: { actions: [...], to?, cost? } })` (every action must be named; the name is the node id; an action may carry `repeat`). The actions run on the edge into the node, so a route to the node ends with the action; the edge out is empty and costs 0. Also methods on the tree and snake_case aliases (`register_screens`).
 - Remove with `unregisterScreens(idOrIdsOrTemplate)`, `unregisterEdges(ids)`, `clearDynamic()`. File screens and edges cannot be removed.
 - Existing ids are an error by default. `{ onDuplicate: "skip" | "replace" }` changes that (dynamic items only).
 - `createTree()` makes an empty tree. `cloneTree(tree)` makes an independent copy.

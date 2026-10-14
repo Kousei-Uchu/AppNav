@@ -121,7 +121,7 @@ NAVGRAPH/2                      header, required, first non-comment line
 APP "Name"                      optional
 VAR NAME : type [= json]        zero or more
 SCREEN id "Display Name" [{json metadata}]
-src -> dst [attrs] [{ DO TYPE {json} ... }]
+src -> dst [attrs] [{ DO TYPE {json} [repeat=N] ... }]
 END                             optional, nothing may follow it
 ```
 
@@ -149,6 +149,27 @@ a -> b [cost=2, if=SIGNED_IN, id=hop, label="Go", weight=7]
 | anything else | Free metadata, stored on `edge.meta`. Can be validated by a schema. |
 
 The cost belongs to the edge, not to the actions. An edge with three actions and `cost=3` is still one transition.
+
+### Repeating an action
+
+Put `repeat` after the payload to say "do this action N times in a row", such as pressing a button four times:
+
+```
+cart -> decrease_quantity { DO TAP { "target": "Reduce Quantity" } repeat=4 }
+cart -> decrease_quantity { DO TAP { "target": "Reduce Quantity" } repeat=$EXTRA_QUANTITY$ }
+```
+
+`repeat` sits next to the payload, not inside it, so action schemas are not affected. It is a whole number of at least 1, or one reference to a `number` (or `any`) variable, written bare (`repeat=$EXTRA_QUANTITY$`) or quoted (`repeat="$EXTRA_QUANTITY$"`). A variable is resolved when instructions are built, so the app can work the count out from its current state and pass it as a route variable.
+
+Validation rejects `0`, negatives, fractions, text, and references to undeclared or non numeric variables with `INVALID_REPEAT`. If a variable resolves to something that is not a whole number of at least 1, `buildInstructions` throws a `VariableError` with the code `INVALID_REPEAT`.
+
+The step is not duplicated. The output keeps one action and adds the count, so an app can show "x4":
+
+```json
+{ "type": "TAP", "data": { "target": "Reduce Quantity" }, "repeat": 4, "extensions": {} }
+```
+
+Actions without a `repeat` have no `repeat` field. Repeating does not change the cost of the edge.
 
 ### Conditions
 
@@ -198,7 +219,7 @@ Substitution happens inside action payload strings:
 | `"$$PRODUCT_ID$$"` | `"$PRODUCT_ID$"` (escaped literal) |
 | `"costs $5"` | `"costs $5"` (a lone `$` is left alone) |
 
-A string that is exactly one reference gets the variable's native type. Embedded references use the string form, with objects and arrays written as JSON. Only values are substituted, never object keys. Undefined variables and missing required values throw a `VariableError` instead of producing an empty string.
+A variable can also be an action's `repeat` count (see "Repeating an action"). A string that is exactly one reference gets the variable's native type. Embedded references use the string form, with objects and arrays written as JSON. Only values are substituted, never object keys. Undefined variables and missing required values throw a `VariableError` instead of producing an empty string.
 
 Precedence, lowest to highest:
 
@@ -320,7 +341,7 @@ Notes:
 }
 ```
 
-It is ordinary JSON. Options for `buildInstructions`: `variables`, `runtime`, `extensions`, `extensionVariables`, `onError`, `includeUnresolved` (keeps the original payload on each action as `unresolved`, handy for debugging), and `strictVariables`.
+It is ordinary JSON. An action that declares a `repeat` carries the resolved count as `repeat`; other actions have no such field. Options for `buildInstructions`: `variables`, `runtime`, `extensions`, `extensionVariables`, `onError`, `includeUnresolved` (keeps the original payload on each action as `unresolved`, handy for debugging), and `strictVariables`.
 
 Narrow actions with `isAction`:
 
@@ -398,6 +419,8 @@ runtime.executeSync(instructions, { context: { driver } });
 ```
 
 Handlers get the validated, resolved payload plus your context. Options include `timeoutMs`, `retries`, `retryDelayMs`, `skipUnhandled`, `continueOnError`, `signal` (an `AbortSignal`), and an `onAction` callback. A global registry is available through `registerActionHandler` for apps that prefer one.
+
+An action with a `repeat` runs its handler that many times in a row. Handlers receive `iteration` and `iterations` (both 1 when there is no repeat), and each repetition produces its own entry in `results` with `iteration` set. A failed repetition ends the run of that action, so it is never repeated blindly.
 
 ## Typing and extensibility
 
@@ -486,6 +509,16 @@ registerActions("cart", {
   remove_item: { name: "Remove item", actions: [{ type: "SWIPE", data: { direction: "left" } }] },
   clear_cart: [{ type: "TAP", data: { target: "Clear" } }], // an array is shorthand for { actions }
 });
+```
+
+Actions inside `actions` take `repeat` like file actions do, as a number or a `$NAME$` reference to a variable the app fills in when it plans:
+
+```ts
+registerActions("cart", {
+  decrease_quantity: { actions: [{ type: "TAP", data: { target: "Reduce Quantity" }, repeat: "$EXTRA_QUANTITY$" }] },
+});
+// declare VAR EXTRA_QUANTITY : number in the graph, then:
+calculatePath(tree, "cart", "decrease_quantity", "astar", { variables: { EXTRA_QUANTITY: 4 } });
 ```
 
 Each action accepts `name`, `actions`, `to` (the screen you end on, default the parent) and `cost` (of the transition into the node, which is where the actions run, default 1). The edge out of the node goes to `to`, has no actions and costs 0. If `to` is another screen, the node acts as a transition that performs the actions first. An unnamed action, such as a bare array, is rejected with an error that shows the call to use.

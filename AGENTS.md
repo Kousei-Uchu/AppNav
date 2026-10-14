@@ -13,7 +13,8 @@ Checklist when generating or editing a `.navgraph`:
 4. Every `DO TYPE` must exist in the active schema, and payloads must satisfy its `required` and `properties`.
 5. Costs are non-negative numbers. Use cost for "how bad is this transition", not for action counts.
 6. Quote `if=` expressions that contain commas or brackets.
-7. Validate with `validateGraph(parseGraph(text))` or `indexTreeFromText(text, { diagnostics: "collect" })` and read `diagnostics` (each has code, line, column).
+7. Use `repeat=N` or `repeat=$VAR$` after a `DO` payload for "do this N times". Do not write the same `DO` line several times, and remember cost is per edge, not per repetition.
+8. Validate with `validateGraph(parseGraph(text))` or `indexTreeFromText(text, { diagnostics: "collect" })` and read `diagnostics` (each has code, line, column).
 
 Checklist when writing code against the API (dynamic graphs):
 - Dynamic registration (`registerScreens`, `registerEdges`, `registerActions`) changes the tree in place and returns the same tree. Use `cloneTree` for an independent copy.
@@ -21,6 +22,7 @@ Checklist when writing code against the API (dynamic graphs):
 - Added items are flagged `dynamic`. Remove them with `unregisterScreens`, `unregisterEdges` or `clearDynamic`. File items cannot be removed.
 - Registered screens, edges and actions are validated like a parsed graph. Action types must exist in the tree's schema. Failures throw `ValidationError`; `{ diagnostics: "collect" }` keeps the valid items instead.
 - `registerActions(screen, { name: { actions: [...] } })` needs a name per action. Duplicate ids error unless `onDuplicate` is `"skip"` or `"replace"`.
+- Registered actions accept `repeat` (a whole number >= 1, or a `$VAR$` the route supplies). It appears on the instruction action as `repeat`.
 - Action nodes perform their actions on the edge into the node (`cart -> remove_item`). The edge back is empty and free. Write `ACTION` nodes in files the same way.
 - Template copies clone incident edges when `cloneEdges` is true. A registration call is all or nothing.
 

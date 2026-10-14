@@ -64,6 +64,12 @@ export interface Screen {
 export interface ActionDeclaration {
   readonly type: string;
   readonly data: JsonObject;
+  /**
+   * How many times the app performs the action in a row. A whole number of at
+   * least 1, or a single `$NAME$` reference resolved when instructions are built.
+   * Kept next to `data` so action payload schemas are not affected.
+   */
+  readonly repeat?: number | string;
   readonly line?: number;
   readonly column?: number;
 }

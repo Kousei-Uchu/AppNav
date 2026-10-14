@@ -22,6 +22,13 @@ import type { ActionDeclaration, Diagnostic, Edge, JsonObject, Screen, VariableD
  * only when the whole call succeeds, so a failed call leaves the tree untouched.
  */
 
+/** One action on a registered edge. `repeat` is a whole number of at least 1 or a single `$NAME$` reference. */
+export interface ActionInput {
+  type: string;
+  data?: JsonObject;
+  repeat?: number | string;
+}
+
 export interface ScreenSpec {
   id: string;
   name?: string;
@@ -41,7 +48,7 @@ export interface EdgeSpec {
   cost?: number;
   condition?: string;
   meta?: JsonObject;
-  actions?: ReadonlyArray<{ type: string; data?: JsonObject }>;
+  actions?: ReadonlyArray<ActionInput>;
 }
 
 export interface RegisterOptions extends ValidateOptions {
@@ -67,7 +74,7 @@ export interface ActionSpec {
   /** Display name. Defaults to the action's own name. */
   name?: string;
   /** Actions performed on the way into the node. */
-  actions: ReadonlyArray<{ type: string; data?: JsonObject }>;
+  actions: ReadonlyArray<ActionInput>;
   /** Screen the app is on after the action. Default: the parent screen. */
   to?: string;
   /** Cost of the transition into the node, which is where the actions run. Default 1. */
@@ -212,7 +219,13 @@ function finish(st: Stage, options: RegisterOptions): void {
 }
 
 function cloneActions(actions: readonly ActionDeclaration[]): ActionDeclaration[] {
-  return actions.map((a) => ({ type: a.type, data: cloneJson(a.data), line: a.line, column: a.column }));
+  return actions.map((a) => ({
+    type: a.type,
+    data: cloneJson(a.data),
+    ...(a.repeat !== undefined ? { repeat: a.repeat } : {}),
+    line: a.line,
+    column: a.column,
+  }));
 }
 
 // ---------------------------------------------------------------------------
@@ -335,7 +348,13 @@ function stageEdges(st: Stage, input: unknown, options: RegisterOptions): void {
       to: spec.to,
       cost: spec.cost === undefined ? 1 : spec.cost,
       condition,
-      actions: (spec.actions ?? []).map((a) => ({ type: a.type, data: a.data ? cloneJson(a.data) : {} })),
+      actions: (spec.actions ?? []).map(
+        (a): ActionDeclaration => ({
+          type: a.type,
+          data: a.data ? cloneJson(a.data) : {},
+          ...(a.repeat !== undefined ? { repeat: a.repeat } : {}),
+        }),
+      ),
       meta: spec.meta ? cloneJson(spec.meta) : {},
       index: st.nextEdge++,
       dynamic: true,
