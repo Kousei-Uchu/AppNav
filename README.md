@@ -576,37 +576,61 @@ const out = buildInstructionsSync(calculatePath(tree, "home", "remove_item"));
 // path: home, cart, remove_item. The last step carries the SWIPE.
 ```
 
-### Worked example: recovering when the user goes off track
+### Planning through several stops: `planRoute`
 
-The app owns recovery. routegraph does not know where the user is and never decides that they are off track. Your app notices (for example, a tutorial expects one item in the cart and there are five), picks the goal, and asks for a route from the screen it believes the user is on. Planning from any screen is one `calculatePath` call.
+`planRoute(tree, from, waypoints, options?)` plans each leg from the end of the previous one and returns one combined `Path` and one `Instructions`. `from` is a plain argument: the app passes whatever screen it believes the user is on.
 
 ```ts
-import { ASTAR, buildInstructionsSync, calculatePath, indexTreeFromText, registerActions } from "routegraph";
+import { planRoute } from "routegraph";
+
+const plan = planRoute(tree, "cart", [
+  { action: "decrease_quantity", repeat: 4 }, // perform an action node, four times
+  { screen: "tutorial_end" },                 // then go to a screen
+]);
+
+if (plan.ok) {
+  plan.path;         // one Path, buildInstructions(plan.path) gives the same instructions
+  plan.instructions; // one Instructions
+} else {
+  plan.leg;          // 0-based index of the leg that could not be planned
+  plan.error;        // NoPathError, or UnknownScreenError when an id is not in the tree
+}
+```
+
+- A waypoint is `{ screen }` or `{ action, repeat? }`. An action waypoint must name an action node.
+- `repeat` on an action waypoint replaces the repeat of the actions on the step into the node. It is a whole number of at least 1 or one `$NAME$` reference filled from `options.variables`, so the app can compute it from the current cart. It stays data on the step (`action.repeat = 4`), never duplicated steps.
+- Each step has `leg` (0-based) and `instructions.legs` lists `{ leg, from, to, steps }`, so an app can show "now go back to the tutorial" between legs. A waypoint on the screen you are already on is a leg with zero steps.
+- A stop on an action node is the start of the next leg. The edge out of the node is empty and free, so the first step of the next leg does nothing.
+- Options are the `calculatePath` options plus `algorithm` (default A\*) and `build` (options for building instructions). `planRoute` builds with `buildInstructionsSync`. Use `planRouteAsync` when extension hooks are async.
+- Bad waypoint shapes throw `INVALID_WAYPOINT`, and a bad `repeat` throws `INVALID_REPEAT`. A leg that cannot be planned is returned as `{ ok: false, leg, error }` instead of thrown, because the app's idea of where the user is can be stale.
+- `planRoute` does not track position, detect that the user is off track, or choose a new goal. Those stay in the app.
+
+### Worked example: recovering when the user goes off track
+
+The app owns recovery. Your app notices (for example, a tutorial expects one item in the cart and there are five), picks the goal, and asks for a route from the screen it believes the user is on.
+
+```ts
+import { indexTreeFromText, planRoute, registerActions } from "routegraph";
 
 const tree = indexTreeFromText(`NAVGRAPH/2
-VAR EXTRA_QUANTITY : number = 1
 SCREEN cart "Cart"
 SCREEN tutorial_end "Checkout step"
 cart -> tutorial_end { DO TAP { "target": "Checkout" } }
 END`);
 
 registerActions(tree, "cart", {
-  decrease_quantity: {
-    name: "Reduce quantity",
-    actions: [{ type: "TAP", data: { target: "Reduce Quantity" }, repeat: "$EXTRA_QUANTITY$" }],
-  },
+  decrease_quantity: { name: "Reduce quantity", actions: [{ type: "TAP", data: { target: "Reduce Quantity" } }] },
 });
 
 // The app decides to recover: four too many, user is on the cart.
-const doIt = calculatePath(tree, "cart", "decrease_quantity", ASTAR, { variables: { EXTRA_QUANTITY: 4 } });
-const goBack = calculatePath(tree, "decrease_quantity", "tutorial_end", ASTAR);
-
-const legs = [buildInstructionsSync(doIt), buildInstructionsSync(goBack)];
-// legs[0]: one step into the node, kind "action", TAP "Reduce Quantity" with repeat 4 (show "x4").
-// legs[1]: an empty step back to the cart, then TAP "Checkout" to reach the tutorial step.
+const plan = planRoute(tree, "cart", [{ action: "decrease_quantity", repeat: 4 }, { screen: "tutorial_end" }]);
+// plan.instructions.steps:
+//   leg 0: cart -> decrease_quantity   kind "action", TAP "Reduce Quantity" with repeat 4 (show "x4")
+//   leg 1: decrease_quantity -> cart   empty step back to the cart
+//   leg 1: cart -> tutorial_end        TAP "Checkout"
 ```
 
-Each leg is its own `Instructions` object, so the app can show "now go back to the tutorial" between them. The same code is in `examples/recover-extra-quantity.ts` and is run by `tests/recovery-example.test.ts`, so it cannot drift from the API.
+The same code is in `examples/recover-extra-quantity.ts` and is run by `tests/recovery-example.test.ts`, so it cannot drift from the API.
 
 ## Development helpers (optional)
 

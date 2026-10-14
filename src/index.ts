@@ -64,6 +64,7 @@ export {
   type BuiltinAlgorithm,
   type Heuristic,
   type Path,
+  type PathLeg,
   type PathOptions,
   type PathResult,
   type PathfindingAlgorithm,
@@ -108,6 +109,17 @@ export {
   type HandlerContext,
   type HandlerOptions,
 } from "./runtime";
+export {
+  planRoute,
+  planRouteAsync,
+  type ActionWaypoint,
+  type PlanAsyncResult,
+  type PlanFailure,
+  type PlanOptions,
+  type PlanResult,
+  type ScreenWaypoint,
+  type Waypoint,
+} from "./plan";
 export { getDefaultTree, setDefaultTree } from "./default-tree";
 export * from "./dynamic";
 

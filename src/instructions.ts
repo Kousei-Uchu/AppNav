@@ -42,6 +42,8 @@ export interface InstructionStep {
   kind?: StepKind;
   /** For action steps, the id of the action node the step arrives at, such as `remove_item:product_2`. */
   actionNode?: string;
+  /** 0-based index of the `planRoute` leg this step belongs to. Only set for planned routes. */
+  leg?: number;
   /** Id of the graph edge this step traverses. */
   edge: string;
   cost: number;
@@ -55,6 +57,8 @@ export interface Instructions {
   path: string[];
   steps: InstructionStep[];
   cost: number;
+  /** Leg boundaries of a `planRoute` route (0-based legs, step counts), so an app can say "now go back to the tutorial". */
+  legs?: Array<{ leg: number; from: string; to: string; steps: number }>;
   /** Route level extension output. */
   extensions: Record<string, JsonValue>;
   meta: { app?: string; algorithm: string; generator: string };
@@ -165,6 +169,9 @@ function* generate(path: Path, options: BuildOptions): Job<Instructions> {
     return s;
   };
 
+  const legOfEdge: number[] = [];
+  for (const l of path.legs ?? []) for (let k = 0; k < l.steps; k++) legOfEdge.push(l.leg);
+
   // 1. Resolve every payload up front so variable errors surface before any extension runs.
   const steps: InstructionStep[] = path.edges.map((edge: Edge, i: number): InstructionStep => {
     const arrival = tree.screen(edge.to);
@@ -172,6 +179,7 @@ function* generate(path: Path, options: BuildOptions): Job<Instructions> {
     const isAction = arrival.meta.kind === "action";
     return {
       n: i + 1,
+      ...(legOfEdge[i] !== undefined ? { leg: legOfEdge[i] } : {}),
       from: edge.from,
       to: edge.to,
       toName: arrival.name,
@@ -201,6 +209,7 @@ function* generate(path: Path, options: BuildOptions): Job<Instructions> {
     path: [...path.screens],
     steps,
     cost: path.cost,
+    ...(path.legs ? { legs: path.legs.map((l) => ({ leg: l.leg, from: l.from, to: l.to, steps: l.steps })) } : {}),
     extensions: {},
     meta: { ...(tree.app !== undefined ? { app: tree.app } : {}), algorithm: path.algorithm, generator: GENERATOR_ID },
   };

@@ -14,5 +14,6 @@ export {
 export { buildInstructions, buildInstructionsSync, isAction } from "./instructions";
 export { defineExtension, getExtensionOutput } from "./extensions";
 export { createRuntime, registerActionHandler } from "./runtime";
+export { planRoute, planRouteAsync } from "./plan";
 export { getDefaultTree, setDefaultTree } from "./default-tree";
 export * from "./dynamic";

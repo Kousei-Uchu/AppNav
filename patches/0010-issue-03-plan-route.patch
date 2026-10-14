@@ -1,0 +1,703 @@
+From eba3c893e4132649650c65c74b444220a1d0fdc8 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 14 Oct 2026 03:00:32 +0000
+Subject: [PATCH] Add planRoute to stitch route legs (issue 3)
+
+Getting a user back on track took two calculatePath calls and two
+Instructions objects with nothing to join them.
+
+- planRoute(tree, from, waypoints, options) plans each leg from the end of
+  the previous one and returns one combined Path and one Instructions.
+  Waypoints are { screen } or { action, repeat? }; repeat is a whole number
+  or a $VAR$ from the route variables and stays data on the step.
+- A leg that cannot be planned returns { ok: false, leg, error } (0-based).
+  Unknown screens count, since the app's idea of the user's screen can be
+  stale. Bad waypoint shapes throw INVALID_WAYPOINT.
+- Path.legs, step.leg and Instructions.legs keep the leg boundaries.
+  buildInstructions takes the combined path with no special casing.
+- planRouteAsync for async extensions.
+- The recovery example now uses planRoute. Tests, README, llms.txt,
+  AGENTS.md, CHANGELOG.
+---
+ AGENTS.md                          |   2 +-
+ CHANGELOG.md                       |   2 +-
+ README.md                          |  52 ++++++---
+ examples/recover-extra-quantity.ts |  21 ++--
+ llms.txt                           |   2 +-
+ src/core-exports.ts                |   1 +
+ src/index.ts                       |  12 ++
+ src/instructions.ts                |   9 ++
+ src/pathfinding.ts                 |  11 ++
+ src/plan.ts                        | 169 +++++++++++++++++++++++++++++
+ tests/plan.test.ts                 | 157 +++++++++++++++++++++++++++
+ tests/recovery-example.test.ts     |  22 ++--
+ 12 files changed, 420 insertions(+), 40 deletions(-)
+ create mode 100644 src/plan.ts
+ create mode 100644 tests/plan.test.ts
+
+diff --git a/AGENTS.md b/AGENTS.md
+index d9ec19c..5777eeb 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -25,7 +25,7 @@ Checklist when writing code against the API (dynamic graphs):
+ - Registered screens, edges and actions are validated like a parsed graph. Action types must exist in the tree's schema. Failures throw `ValidationError`; `{ diagnostics: "collect" }` keeps the valid items instead.
+ - `registerActions(screen, { name: { actions: [...] } })` needs a name per action. Duplicate ids error unless `onDuplicate` is `"skip"` or `"replace"`.
+ - Registered actions accept `repeat` (a whole number >= 1, or a `$VAR$` the route supplies). It appears on the instruction action as `repeat`.
+-- Recovery is the app's job: the app passes the current screen and the goal to `calculatePath`, once per leg (see `examples/recover-extra-quantity.ts`). Do not look for position tracking or off-track detection in routegraph.
++- Recovery is the app's job: the app passes the current screen and the stops to `planRoute(tree, from, waypoints, options)` and gets one path and one instructions object (see `examples/recover-extra-quantity.ts`). Check `plan.ok`; a failed plan names the leg. Do not look for position tracking or off-track detection in routegraph, and do not stitch legs by hand.
+ - Action nodes perform their actions on the edge into the node (`cart -> remove_item`). The edge back is empty and free. Write `ACTION` nodes in files the same way.
+ - Template copies differ through params: declare `VAR ITEM_ID : string`, use `$ITEM_ID$` on template edges, register `{ id, params }`. Do not hand-edit cloned edges. Params rank below route `variables`.
+ - Template copies clone incident edges when `cloneEdges` is true. A registration call is all or nothing.
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index c9dd067..166764c 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -21,7 +21,7 @@ Keep a Changelog and the project follows semantic versioning.
+ - Removed the extra aliases: `addScreens`, `addScreen`, `registerScreen`, `addEdges`, `addEdge`, `registerEdge`, `addActions`, `registerAction`, `registerTransition(s)`, `registerTemplate(s)`, `copyTree`, `forkTree`, `cloneNavigationTree`, the `DynamicTree` type, the `add_*` and singular snake_case names, and the instance methods `addScreens`, `addEdges` and `clone`. What remains is the canonical camelCase set, its snake_case mirror (`register_screens`, `register_edges`, `register_actions`, `unregister_screens`, `unregister_edges`, `clear_dynamic`, `clone_tree`) and the instance methods of the same names.
+ - `unregisterScreens` and `unregisterEdges` throw `INVALID_REGISTRATION` for a selector that is not an id, an array of ids, or (screens only) `{ template }`.
+ - Moved the source scanner and the `NavGraphWatcher` component out of the core package into `packages/devtools`, a separate private package. The scanner had stray shell lines at the end of the file and did not parse; fixed. Its unused `--graph` option is gone. The README no longer claims a CLI merge step or a diff, since neither existed. The `scan` npm script is removed.
+-- Added a worked example, `examples/recover-extra-quantity.ts`, with a README section and a test that runs it: route to an action node with a variable `repeat`, then back to the tutorial step, with the app doing its own re-plan.
++- Added `planRoute(tree, from, waypoints, options)` and `planRouteAsync`. Waypoints are `{ screen }` or `{ action, repeat? }`. Each leg is planned from the end of the previous one and the legs come back as one combined `Path` and one `Instructions`. A leg that cannot be planned returns `{ ok: false, leg, error }`. Steps carry `leg`, `Path.legs` and `Instructions.legs` hold the boundaries, and `buildInstructions` takes the combined path with no special casing. The package still does not track position or detect that a user is off track; the app passes `from`.\n- Added a worked example, `examples/recover-extra-quantity.ts`, with a README section and a test that runs it: press Reduce Quantity four times, then return to the tutorial step, with the app doing its own re-plan.
+ - Template copies are now per item. `registerScreens(ids, template)` accepts `{ id, params }`, stores `params` on the screen, and resolves them when instructions are built (graph defaults < screen params < route variables < runtime). `ITEM_ID` defaults to the part of the id after the template prefix when the tree declares it. Unknown or mistyped params are rejected (`UNKNOWN_PARAM`, `PARAM_TYPE`). Before, every copy produced identical instructions.
+ - Removed the `MutableGraphData` type. The no-tree form of `register_screens` no longer builds an empty tree, and now uses the default tree.
+ 
+diff --git a/README.md b/README.md
+index 1a89278..02ed015 100644
+--- a/README.md
++++ b/README.md
+@@ -576,37 +576,61 @@ const out = buildInstructionsSync(calculatePath(tree, "home", "remove_item"));
+ // path: home, cart, remove_item. The last step carries the SWIPE.
+ ```
+ 
++### Planning through several stops: `planRoute`
++
++`planRoute(tree, from, waypoints, options?)` plans each leg from the end of the previous one and returns one combined `Path` and one `Instructions`. `from` is a plain argument: the app passes whatever screen it believes the user is on.
++
++```ts
++import { planRoute } from "routegraph";
++
++const plan = planRoute(tree, "cart", [
++  { action: "decrease_quantity", repeat: 4 }, // perform an action node, four times
++  { screen: "tutorial_end" },                 // then go to a screen
++]);
++
++if (plan.ok) {
++  plan.path;         // one Path, buildInstructions(plan.path) gives the same instructions
++  plan.instructions; // one Instructions
++} else {
++  plan.leg;          // 0-based index of the leg that could not be planned
++  plan.error;        // NoPathError, or UnknownScreenError when an id is not in the tree
++}
++```
++
++- A waypoint is `{ screen }` or `{ action, repeat? }`. An action waypoint must name an action node.
++- `repeat` on an action waypoint replaces the repeat of the actions on the step into the node. It is a whole number of at least 1 or one `$NAME$` reference filled from `options.variables`, so the app can compute it from the current cart. It stays data on the step (`action.repeat = 4`), never duplicated steps.
++- Each step has `leg` (0-based) and `instructions.legs` lists `{ leg, from, to, steps }`, so an app can show "now go back to the tutorial" between legs. A waypoint on the screen you are already on is a leg with zero steps.
++- A stop on an action node is the start of the next leg. The edge out of the node is empty and free, so the first step of the next leg does nothing.
++- Options are the `calculatePath` options plus `algorithm` (default A\*) and `build` (options for building instructions). `planRoute` builds with `buildInstructionsSync`. Use `planRouteAsync` when extension hooks are async.
++- Bad waypoint shapes throw `INVALID_WAYPOINT`, and a bad `repeat` throws `INVALID_REPEAT`. A leg that cannot be planned is returned as `{ ok: false, leg, error }` instead of thrown, because the app's idea of where the user is can be stale.
++- `planRoute` does not track position, detect that the user is off track, or choose a new goal. Those stay in the app.
++
+ ### Worked example: recovering when the user goes off track
+ 
+-The app owns recovery. routegraph does not know where the user is and never decides that they are off track. Your app notices (for example, a tutorial expects one item in the cart and there are five), picks the goal, and asks for a route from the screen it believes the user is on. Planning from any screen is one `calculatePath` call.
++The app owns recovery. Your app notices (for example, a tutorial expects one item in the cart and there are five), picks the goal, and asks for a route from the screen it believes the user is on.
+ 
+ ```ts
+-import { ASTAR, buildInstructionsSync, calculatePath, indexTreeFromText, registerActions } from "routegraph";
++import { indexTreeFromText, planRoute, registerActions } from "routegraph";
+ 
+ const tree = indexTreeFromText(`NAVGRAPH/2
+-VAR EXTRA_QUANTITY : number = 1
+ SCREEN cart "Cart"
+ SCREEN tutorial_end "Checkout step"
+ cart -> tutorial_end { DO TAP { "target": "Checkout" } }
+ END`);
+ 
+ registerActions(tree, "cart", {
+-  decrease_quantity: {
+-    name: "Reduce quantity",
+-    actions: [{ type: "TAP", data: { target: "Reduce Quantity" }, repeat: "$EXTRA_QUANTITY$" }],
+-  },
++  decrease_quantity: { name: "Reduce quantity", actions: [{ type: "TAP", data: { target: "Reduce Quantity" } }] },
+ });
+ 
+ // The app decides to recover: four too many, user is on the cart.
+-const doIt = calculatePath(tree, "cart", "decrease_quantity", ASTAR, { variables: { EXTRA_QUANTITY: 4 } });
+-const goBack = calculatePath(tree, "decrease_quantity", "tutorial_end", ASTAR);
+-
+-const legs = [buildInstructionsSync(doIt), buildInstructionsSync(goBack)];
+-// legs[0]: one step into the node, kind "action", TAP "Reduce Quantity" with repeat 4 (show "x4").
+-// legs[1]: an empty step back to the cart, then TAP "Checkout" to reach the tutorial step.
++const plan = planRoute(tree, "cart", [{ action: "decrease_quantity", repeat: 4 }, { screen: "tutorial_end" }]);
++// plan.instructions.steps:
++//   leg 0: cart -> decrease_quantity   kind "action", TAP "Reduce Quantity" with repeat 4 (show "x4")
++//   leg 1: decrease_quantity -> cart   empty step back to the cart
++//   leg 1: cart -> tutorial_end        TAP "Checkout"
+ ```
+ 
+-Each leg is its own `Instructions` object, so the app can show "now go back to the tutorial" between them. The same code is in `examples/recover-extra-quantity.ts` and is run by `tests/recovery-example.test.ts`, so it cannot drift from the API.
++The same code is in `examples/recover-extra-quantity.ts` and is run by `tests/recovery-example.test.ts`, so it cannot drift from the API.
+ 
+ ## Development helpers (optional)
+ 
+diff --git a/examples/recover-extra-quantity.ts b/examples/recover-extra-quantity.ts
+index ed09982..2673e23 100644
+--- a/examples/recover-extra-quantity.ts
++++ b/examples/recover-extra-quantity.ts
+@@ -1,10 +1,10 @@
+-import { ASTAR, buildInstructionsSync, calculatePath, indexTreeFromText, registerActions, type Instructions, type NavigationTree } from "../src";
++import { indexTreeFromText, planRoute, registerActions, type Instructions, type NavigationTree } from "../src";
+ 
+ /**
+  * Worked example: a tutorial expects one item in the cart, but the user added
+  * extra. The APP notices that and decides to recover. routegraph does not track
+  * where the user is or detect that they are off track. It only plans from the
+- * screen you give it to the goal you give it.
++ * screen you give it, through the stops you give it.
+  */
+ 
+ export const GRAPH = `NAVGRAPH/2
+@@ -17,11 +17,11 @@ END`;
+ export function createTutorialTree(): NavigationTree {
+   const tree = indexTreeFromText(GRAPH);
+   // Registered at runtime, for example when the cart screen mounts.
+-  // The actions run on the way into the node, and `repeat` is filled in at planning time.
++  // The actions run on the way into the node.
+   registerActions(tree, "cart", {
+     decrease_quantity: {
+       name: "Reduce quantity",
+-      actions: [{ type: "TAP", data: { target: "Reduce Quantity" }, repeat: "$EXTRA_QUANTITY$" }],
++      actions: [{ type: "TAP", data: { target: "Reduce Quantity" } }],
+     },
+   });
+   return tree;
+@@ -30,12 +30,11 @@ export function createTutorialTree(): NavigationTree {
+ /**
+  * The app's own re-plan. `current` is the screen the app believes the user is
+  * on, `extra` is how many items too many are in the cart. Returns one
+- * Instructions per leg, in the order to show them.
++ * Instructions: press Reduce Quantity `extra` times, then go on to the tutorial
++ * step. Each step says which leg it belongs to.
+  */
+-export function recoverExtraQuantity(tree: NavigationTree, current: string, extra: number): Instructions[] {
+-  // Leg 1: get to the action node. The last step carries the TAP with repeat: extra.
+-  const doIt = calculatePath(tree, current, "decrease_quantity", ASTAR, { variables: { EXTRA_QUANTITY: extra } });
+-  // Leg 2: from the action node back to where the tutorial was. The first step is an empty move back to the parent.
+-  const goBack = calculatePath(tree, "decrease_quantity", "tutorial_end", ASTAR);
+-  return [buildInstructionsSync(doIt), buildInstructionsSync(goBack)];
++export function recoverExtraQuantity(tree: NavigationTree, current: string, extra: number): Instructions {
++  const plan = planRoute(tree, current, [{ action: "decrease_quantity", repeat: extra }, { screen: "tutorial_end" }]);
++  if (!plan.ok) throw plan.error; // or show something else: plan.leg says which leg failed
++  return plan.instructions;
+ }
+diff --git a/llms.txt b/llms.txt
+index a615779..e705047 100644
+--- a/llms.txt
++++ b/llms.txt
+@@ -97,7 +97,7 @@ Errors: all extend `AppNavError` with `code`, and `file`, `line`, `column`, `ids
+ - Per item params: declare `VAR ITEM_ID : string`, write `$ITEM_ID$` on the template edges once, and `registerScreens(["p1", { id: "p2", params: { ITEM_ID: "SKU-2" } }], "tpl")`. `ITEM_ID` defaults to the id after `tpl:`. Params live on `screen.params` and are resolved at build time: graph defaults < params < route variables < runtime. Names must be declared (`UNKNOWN_PARAM`), types must fit (`PARAM_TYPE`).
+ - Remove with `unregisterScreens(idOrIdsOrTemplate)`, `unregisterEdges(ids)`, `clearDynamic()`. File screens and edges cannot be removed.
+ - Existing ids are an error by default. `{ onDuplicate: "skip" | "replace" }` changes that (dynamic items only).
+-- Recovery: the app decides when to re-plan and calls `calculatePath(tree, currentScreen, goal)` per leg, then `buildInstructionsSync` for each. routegraph does not track position. Worked example: `examples/recover-extra-quantity.ts`.
++- Recovery and multi-stop routes: the app decides when to re-plan and what the goal is, then calls `planRoute(tree, currentScreen, [{ action: "decrease_quantity", repeat: 4 }, { screen: "tutorial_end" }], { variables })`. Returns `{ ok: true, path, instructions }` or `{ ok: false, leg, error }` (0-based leg; `NoPathError` or `UnknownScreenError`). `repeat` is a whole number or `$VAR$` from `variables`. Steps carry `leg`; `instructions.legs` lists the boundaries. `planRouteAsync` for async extensions. Bad waypoints throw `INVALID_WAYPOINT`. routegraph does not track position. Worked example: `examples/recover-extra-quantity.ts`.
+ - `createTree()` makes an empty tree. `cloneTree(tree)` makes an independent copy.
+ - Registered items get the same validation as a parsed graph (action types, payloads, variables, endpoints, conditions). Failures throw `ValidationError` with `diagnostics`; pass `{ diagnostics: "collect" }` to keep the valid items and record the rest in `tree.diagnostics`. A failed call changes nothing.
+ - Custom action types must be declared in the tree's schema. A Path made before a removal throws when built.
+diff --git a/src/core-exports.ts b/src/core-exports.ts
+index cf7c270..17bba64 100644
+--- a/src/core-exports.ts
++++ b/src/core-exports.ts
+@@ -14,5 +14,6 @@ export {
+ export { buildInstructions, buildInstructionsSync, isAction } from "./instructions";
+ export { defineExtension, getExtensionOutput } from "./extensions";
+ export { createRuntime, registerActionHandler } from "./runtime";
++export { planRoute, planRouteAsync } from "./plan";
+ export { getDefaultTree, setDefaultTree } from "./default-tree";
+ export * from "./dynamic";
+diff --git a/src/index.ts b/src/index.ts
+index 9129fb0..62cda9c 100644
+--- a/src/index.ts
++++ b/src/index.ts
+@@ -64,6 +64,7 @@ export {
+   type BuiltinAlgorithm,
+   type Heuristic,
+   type Path,
++  type PathLeg,
+   type PathOptions,
+   type PathResult,
+   type PathfindingAlgorithm,
+@@ -108,6 +109,17 @@ export {
+   type HandlerContext,
+   type HandlerOptions,
+ } from "./runtime";
++export {
++  planRoute,
++  planRouteAsync,
++  type ActionWaypoint,
++  type PlanAsyncResult,
++  type PlanFailure,
++  type PlanOptions,
++  type PlanResult,
++  type ScreenWaypoint,
++  type Waypoint,
++} from "./plan";
+ export { getDefaultTree, setDefaultTree } from "./default-tree";
+ export * from "./dynamic";
+ 
+diff --git a/src/instructions.ts b/src/instructions.ts
+index 6cc897b..aa9091f 100644
+--- a/src/instructions.ts
++++ b/src/instructions.ts
+@@ -42,6 +42,8 @@ export interface InstructionStep {
+   kind?: StepKind;
+   /** For action steps, the id of the action node the step arrives at, such as `remove_item:product_2`. */
+   actionNode?: string;
++  /** 0-based index of the `planRoute` leg this step belongs to. Only set for planned routes. */
++  leg?: number;
+   /** Id of the graph edge this step traverses. */
+   edge: string;
+   cost: number;
+@@ -55,6 +57,8 @@ export interface Instructions {
+   path: string[];
+   steps: InstructionStep[];
+   cost: number;
++  /** Leg boundaries of a `planRoute` route (0-based legs, step counts), so an app can say "now go back to the tutorial". */
++  legs?: Array<{ leg: number; from: string; to: string; steps: number }>;
+   /** Route level extension output. */
+   extensions: Record<string, JsonValue>;
+   meta: { app?: string; algorithm: string; generator: string };
+@@ -165,6 +169,9 @@ function* generate(path: Path, options: BuildOptions): Job<Instructions> {
+     return s;
+   };
+ 
++  const legOfEdge: number[] = [];
++  for (const l of path.legs ?? []) for (let k = 0; k < l.steps; k++) legOfEdge.push(l.leg);
++
+   // 1. Resolve every payload up front so variable errors surface before any extension runs.
+   const steps: InstructionStep[] = path.edges.map((edge: Edge, i: number): InstructionStep => {
+     const arrival = tree.screen(edge.to);
+@@ -172,6 +179,7 @@ function* generate(path: Path, options: BuildOptions): Job<Instructions> {
+     const isAction = arrival.meta.kind === "action";
+     return {
+       n: i + 1,
++      ...(legOfEdge[i] !== undefined ? { leg: legOfEdge[i] } : {}),
+       from: edge.from,
+       to: edge.to,
+       toName: arrival.name,
+@@ -201,6 +209,7 @@ function* generate(path: Path, options: BuildOptions): Job<Instructions> {
+     path: [...path.screens],
+     steps,
+     cost: path.cost,
++    ...(path.legs ? { legs: path.legs.map((l) => ({ leg: l.leg, from: l.from, to: l.to, steps: l.steps })) } : {}),
+     extensions: {},
+     meta: { ...(tree.app !== undefined ? { app: tree.app } : {}), algorithm: path.algorithm, generator: GENERATOR_ID },
+   };
+diff --git a/src/pathfinding.ts b/src/pathfinding.ts
+index f36d46f..bc220e1 100644
+--- a/src/pathfinding.ts
++++ b/src/pathfinding.ts
+@@ -55,6 +55,15 @@ export interface PathOptions {
+   strictVariables?: boolean;
+ }
+ 
++/** One leg of a route planned with `planRoute`. `leg` is a 0-based index. */
++export interface PathLeg {
++  readonly leg: number;
++  readonly from: string;
++  readonly to: string;
++  /** Number of edges (steps) in this leg. Zero when the leg starts where it ends. */
++  readonly steps: number;
++}
++
+ export interface Path {
+   readonly from: string;
+   readonly to: string;
+@@ -67,6 +76,8 @@ export interface Path {
+   readonly visited: number;
+   /** Route variables supplied to calculatePath. */
+   readonly variables: Record<string, JsonValue>;
++  /** Leg boundaries, present only on paths made by `planRoute`. */
++  readonly legs?: readonly PathLeg[];
+   /** Owning tree (not enumerable, so JSON.stringify(path) stays clean). */
+   readonly tree: NavigationTree;
+ }
+diff --git a/src/plan.ts b/src/plan.ts
+new file mode 100644
+index 0000000..60f356a
+--- /dev/null
++++ b/src/plan.ts
+@@ -0,0 +1,169 @@
++import { AppNavError, UnknownScreenError } from "./errors";
++import type { NavigationTree } from "./graph";
++import { buildInstructions, buildInstructionsSync, type BuildOptions, type Instructions } from "./instructions";
++import { ASTAR, tryCalculatePath, type AlgorithmRef, type Path, type PathLeg, type PathOptions } from "./pathfinding";
++import type { Edge, JsonValue } from "./types";
++import { parseTemplate } from "./variables";
++
++/**
++ * Plan one route through several stops. The app decides where the user is
++ * (`from`), what has to happen and where to end up. routegraph only plans each
++ * leg from the end of the previous one and stitches the legs together. It never
++ * tracks position and never decides that someone is off track.
++ */
++
++/** Go to a screen. */
++export interface ScreenWaypoint {
++  screen: string;
++}
++
++/**
++ * Perform an action node, then stay on it. `repeat` replaces the repeat of the
++ * actions on the step into the node: a whole number of at least 1, or one
++ * `$NAME$` reference filled from the route `variables`.
++ */
++export interface ActionWaypoint {
++  action: string;
++  repeat?: number | string;
++}
++
++export type Waypoint = ScreenWaypoint | ActionWaypoint;
++
++export interface PlanOptions extends PathOptions {
++  /** Algorithm for every leg. Default A*. */
++  algorithm?: AlgorithmRef;
++  /** Options for building the combined instructions. Route variables are shared with `variables`. */
++  build?: BuildOptions;
++}
++
++export type PlanFailure = { ok: false; leg: number; error: AppNavError };
++export type PlanResult = { ok: true; path: Path; instructions: Instructions } | PlanFailure;
++export type PlanAsyncResult = { ok: true; path: Path; instructions: Instructions } | PlanFailure;
++
++type Planned = { ok: true; path: Path } | PlanFailure;
++
++function checkWaypoints(tree: NavigationTree, waypoints: readonly Waypoint[]): void {
++  const usage = `planRoute(tree, "cart", [{ action: "decrease_quantity", repeat: 4 }, { screen: "tutorial_end" }])`;
++  if (!Array.isArray(waypoints) || waypoints.length === 0) {
++    throw new AppNavError("INVALID_WAYPOINT", `planRoute needs a non-empty array of waypoints. Use ${usage}`);
++  }
++  waypoints.forEach((w, i) => {
++    const o = w as unknown as Record<string, unknown>;
++    const isScreen = typeof o?.screen === "string";
++    const isAction = typeof o?.action === "string";
++    if (!o || typeof o !== "object" || isScreen === isAction) {
++      throw new AppNavError("INVALID_WAYPOINT", `Waypoint ${i} must be { screen } or { action, repeat? }. Use ${usage}`, { ids: [] });
++    }
++    const extra = Object.keys(o).filter((k) => !(isScreen ? ["screen"] : ["action", "repeat"]).includes(k));
++    if (extra.length > 0) {
++      throw new AppNavError("INVALID_WAYPOINT", `Waypoint ${i} has unknown ${extra.map((k) => `"${k}"`).join(", ")}${isScreen && "repeat" in o ? ". Only action waypoints take repeat" : ""}`);
++    }
++    if (isAction) {
++      const id = o.action as string;
++      if (tree.hasScreen(id) && tree.screen(id).meta.kind !== "action") {
++        throw new AppNavError("INVALID_WAYPOINT", `Waypoint ${i}: "${id}" is a screen, not an action node. Use { screen: "${id}" }`, { ids: [id] });
++      }
++      const r = o.repeat;
++      if (r !== undefined) {
++        const segs = typeof r === "string" ? parseTemplate(r) : [];
++        const okNumber = typeof r === "number" && Number.isInteger(r) && r >= 1;
++        const okVar = typeof r === "string" && segs.length === 1 && segs[0]?.kind === "var";
++        if (!okNumber && !okVar) {
++          throw new AppNavError("INVALID_REPEAT", `Waypoint ${i} has invalid repeat ${JSON.stringify(r)}. Use a whole number of at least 1 or a single $NAME$ reference`, { ids: [id] });
++        }
++      }
++    }
++  });
++}
++
++function plan(tree: NavigationTree, from: string, waypoints: readonly Waypoint[], options: PlanOptions): Planned {
++  checkWaypoints(tree, waypoints);
++  const { algorithm = ASTAR, build: _build, ...pathOptions } = options;
++  void _build;
++
++  const edges: Edge[] = [];
++  const screens: string[] = [];
++  const legs: PathLeg[] = [];
++  let cost = 0;
++  let visited = 0;
++  let label = typeof algorithm === "function" ? algorithm.name || "custom" : algorithm;
++  let at = from;
++
++  for (let i = 0; i < waypoints.length; i++) {
++    const w = waypoints[i] as Waypoint;
++    const target = "screen" in w ? w.screen : w.action;
++    let result;
++    try {
++      result = tryCalculatePath(tree, at, target, algorithm, pathOptions);
++    } catch (e) {
++      if (e instanceof UnknownScreenError) return { ok: false, leg: i, error: e };
++      throw e;
++    }
++    if (!result.ok) return { ok: false, leg: i, error: result.error };
++    const leg = result.path;
++    let legEdges = leg.edges;
++    if ("action" in w && w.repeat !== undefined) {
++      const last = legEdges[legEdges.length - 1];
++      if (!last || last.actions.length === 0) {
++        const why = last ? `the step into "${target}" has no actions to repeat` : `the app is already on "${target}", so there is no step to repeat`;
++        return { ok: false, leg: i, error: new AppNavError("INVALID_WAYPOINT", `Waypoint ${i}: ${why}`, { ids: [target] }) };
++      }
++      const repeat = w.repeat;
++      legEdges = [...legEdges.slice(0, -1), { ...last, actions: last.actions.map((a) => ({ ...a, repeat })) }];
++    }
++    if (i === 0) label = leg.algorithm;
++    edges.push(...legEdges);
++    // Each leg starts where the previous one ended, so its first screen is already listed.
++    screens.push(...(i === 0 ? leg.screens : leg.screens.slice(1)));
++    legs.push({ leg: i, from: at, to: target, steps: legEdges.length });
++    cost += leg.cost;
++    visited += leg.visited;
++    at = target;
++  }
++
++  const path = {
++    from,
++    to: at,
++    screens,
++    edges,
++    cost,
++    algorithm: label,
++    visited,
++    variables: { ...(pathOptions.variables ?? {}), ...(pathOptions.runtime ?? {}) } as Record<string, JsonValue>,
++    legs,
++  } as unknown as Path;
++  Object.defineProperty(path, "tree", { value: tree, enumerable: false });
++  return { ok: true, path };
++}
++
++/**
++ * Plan from `from` through each waypoint in order and return one combined
++ * `Path` and one `Instructions`. Each leg starts where the previous one ended,
++ * so an action node you stop on is simply the start of the next leg (the edge
++ * out of it is empty and free). Steps carry `leg` (0-based) and the
++ * instructions list the leg boundaries.
++ *
++ * When a leg cannot be planned, returns `{ ok: false, leg, error }` with the
++ * 0-based index of the failing leg, so the app can decide what to do. Bad
++ * waypoint shapes throw `INVALID_WAYPOINT`. Variable problems found while
++ * building instructions throw, as they do for `buildInstructions`.
++ *
++ * Uses `buildInstructionsSync`; use `planRouteAsync` when extensions are async.
++ */
++export function planRoute(tree: NavigationTree, from: string, waypoints: readonly Waypoint[], options: PlanOptions = {}): PlanResult {
++  const planned = plan(tree, from, waypoints, options);
++  if (!planned.ok) return planned;
++  return { ok: true, path: planned.path, instructions: buildInstructionsSync(planned.path, options.build) };
++}
++
++/** Same as `planRoute`, building the instructions with the async `buildInstructions`. */
++export async function planRouteAsync(
++  tree: NavigationTree,
++  from: string,
++  waypoints: readonly Waypoint[],
++  options: PlanOptions = {},
++): Promise<PlanAsyncResult> {
++  const planned = plan(tree, from, waypoints, options);
++  if (!planned.ok) return planned;
++  return { ok: true, path: planned.path, instructions: await buildInstructions(planned.path, options.build) };
++}
+diff --git a/tests/plan.test.ts b/tests/plan.test.ts
+new file mode 100644
+index 0000000..97cc47a
+--- /dev/null
++++ b/tests/plan.test.ts
+@@ -0,0 +1,157 @@
++import { describe, expect, it } from "vitest";
++import {
++  NoPathError,
++  UnknownScreenError,
++  VariableError,
++  buildInstructions,
++  buildInstructionsSync,
++  indexTreeFromText,
++  planRoute,
++  planRouteAsync,
++  registerActions,
++} from "../src";
++
++const GRAPH = `NAVGRAPH/2
++VAR EXTRA_QUANTITY : number = 1
++SCREEN home "Home"
++SCREEN cart "Cart"
++SCREEN tutorial_end "Checkout step"
++SCREEN island "Island"
++home -> cart { DO TAP { "target": "Cart" } }
++cart -> home { DO BACK {} }
++cart -> tutorial_end { DO TAP { "target": "Checkout" } }
++END`;
++
++function tree() {
++  const t = indexTreeFromText(GRAPH);
++  registerActions(t, "cart", {
++    decrease_quantity: { name: "Reduce quantity", actions: [{ type: "TAP", data: { target: "Reduce Quantity" }, repeat: "$EXTRA_QUANTITY$" }] },
++    clear_cart: [{ type: "TAP", data: { target: "Clear" } }],
++  });
++  return t;
++}
++
++const ok = (r: ReturnType<typeof planRoute>) => {
++  if (!r.ok) throw new Error(`plan failed at leg ${r.leg}: ${r.error.message}`);
++  return r;
++};
++
++describe("planRoute", () => {
++  it("stitches legs into one path and one instructions object", () => {
++    const r = ok(planRoute(tree(), "home", [{ action: "decrease_quantity", repeat: 4 }, { screen: "tutorial_end" }]));
++    expect(r.path.screens).toEqual(["home", "cart", "decrease_quantity", "cart", "tutorial_end"]);
++    expect(r.path.from).toBe("home");
++    expect(r.path.to).toBe("tutorial_end");
++    expect(r.instructions.steps.map((s) => [s.n, s.leg, s.from, s.to, s.kind])).toEqual([
++      [1, 0, "home", "cart", "navigate"],
++      [2, 0, "cart", "decrease_quantity", "action"],
++      [3, 1, "decrease_quantity", "cart", "navigate"],
++      [4, 1, "cart", "tutorial_end", "navigate"],
++    ]);
++    expect(r.instructions.steps[1]!.actions).toMatchObject([{ type: "TAP", data: { target: "Reduce Quantity" }, repeat: 4 }]);
++    expect(r.instructions.steps[2]!.actions).toEqual([]);
++    expect(r.instructions.legs).toEqual([
++      { leg: 0, from: "home", to: "decrease_quantity", steps: 2 },
++      { leg: 1, from: "decrease_quantity", to: "tutorial_end", steps: 2 },
++    ]);
++    expect(r.path.cost).toBe(r.instructions.cost);
++    expect(r.instructions.to).toBe("tutorial_end");
++  });
++
++  it("plans from any screen the app names", () => {
++    const r = ok(planRoute(tree(), "cart", [{ action: "clear_cart" }, { screen: "home" }]));
++    expect(r.path.screens).toEqual(["cart", "clear_cart", "cart", "home"]);
++  });
++
++  it("buildInstructions accepts the combined path with no special casing", async () => {
++    const r = ok(planRoute(tree(), "home", [{ action: "clear_cart" }, { screen: "tutorial_end" }]));
++    expect(buildInstructionsSync(r.path)).toEqual(r.instructions);
++    expect(await buildInstructions(r.path)).toEqual(r.instructions);
++  });
++
++  it("planRouteAsync gives the same result", async () => {
++    const t = tree();
++    const waypoints = [{ action: "decrease_quantity", repeat: 2 }, { screen: "home" }];
++    const a = await planRouteAsync(t, "cart", waypoints);
++    const s = planRoute(t, "cart", waypoints);
++    expect(a).toEqual(s);
++  });
++
++  it("does not touch the tree's own edges when it overrides a repeat", () => {
++    const t = tree();
++    ok(planRoute(t, "cart", [{ action: "decrease_quantity", repeat: 9 }], { variables: { EXTRA_QUANTITY: 2 } }));
++    const again = ok(planRoute(t, "cart", [{ action: "decrease_quantity" }], { variables: { EXTRA_QUANTITY: 2 } }));
++    expect(again.instructions.steps[0]!.actions[0]!.repeat).toBe(2);
++  });
++});
++
++describe("repeat on a waypoint", () => {
++  it("accepts a variable the app computes", () => {
++    const r = ok(planRoute(tree(), "cart", [{ action: "clear_cart", repeat: "$EXTRA_QUANTITY$" }], { variables: { EXTRA_QUANTITY: 3 } }));
++    expect(r.instructions.steps[0]!.actions[0]!.repeat).toBe(3);
++  });
++
++  it("rejects bad repeats up front and fails clearly when the variable has no usable value", () => {
++    const code = (repeat: unknown) => {
++      try {
++        planRoute(tree(), "cart", [{ action: "clear_cart", repeat: repeat as never }]);
++      } catch (e) {
++        return (e as { code?: string }).code;
++      }
++    };
++    for (const bad of [0, -1, 1.5, "four", "x$A$", "$A$$B$"]) expect(code(bad), String(bad)).toBe("INVALID_REPEAT");
++    expect(() => planRoute(tree(), "cart", [{ action: "clear_cart", repeat: "$NOPE$" }])).toThrow(VariableError);
++    expect(() => planRoute(tree(), "cart", [{ action: "clear_cart", repeat: "$EXTRA_QUANTITY$" }], { variables: { EXTRA_QUANTITY: 0 } })).toThrow(VariableError);
++  });
++
++  it("reports a repeat that has nothing to repeat, instead of ignoring it", () => {
++    const t = tree();
++    const r = planRoute(t, "decrease_quantity", [{ action: "decrease_quantity", repeat: 2 }]);
++    expect(r.ok).toBe(false);
++    if (!r.ok) expect(r).toMatchObject({ leg: 0, error: { code: "INVALID_WAYPOINT" } });
++  });
++});
++
++describe("failures", () => {
++  it("returns the failing leg and keeps going no further", () => {
++    const r = planRoute(tree(), "home", [{ screen: "cart" }, { screen: "island" }, { screen: "home" }]);
++    expect(r.ok).toBe(false);
++    if (!r.ok) {
++      expect(r.leg).toBe(1);
++      expect(r.error).toBeInstanceOf(NoPathError);
++    }
++  });
++
++  it("returns an unknown screen as a failed leg, since the app's idea of where the user is can be stale", () => {
++    const a = planRoute(tree(), "ghost", [{ screen: "cart" }]);
++    expect(a.ok === false && a.leg === 0 && a.error instanceof UnknownScreenError).toBe(true);
++    const b = planRoute(tree(), "home", [{ screen: "cart" }, { screen: "ghost" }]);
++    expect(b.ok === false && b.leg === 1 && b.error instanceof UnknownScreenError).toBe(true);
++  });
++
++  it("throws INVALID_WAYPOINT for waypoints that are the wrong shape", () => {
++    const code = (w: unknown) => {
++      try {
++        planRoute(tree(), "home", w as never);
++      } catch (e) {
++        return (e as { code?: string }).code;
++      }
++    };
++    expect(code([])).toBe("INVALID_WAYPOINT");
++    expect(code("cart")).toBe("INVALID_WAYPOINT");
++    expect(code([{}])).toBe("INVALID_WAYPOINT");
++    expect(code([{ screen: "cart", action: "clear_cart" }])).toBe("INVALID_WAYPOINT");
++    expect(code([{ screen: "cart", repeat: 2 }])).toBe("INVALID_WAYPOINT");
++    expect(code([{ action: "cart" }])).toBe("INVALID_WAYPOINT");
++    expect(code([{ screen: "cart", extra: 1 }])).toBe("INVALID_WAYPOINT");
++  });
++});
++
++describe("zero length legs", () => {
++  it("a waypoint on the screen the user is already on adds no steps", () => {
++    const r = ok(planRoute(tree(), "cart", [{ screen: "cart" }, { screen: "home" }]));
++    expect(r.instructions.steps.map((s) => s.leg)).toEqual([1]);
++    expect(r.instructions.legs?.map((l) => l.steps)).toEqual([0, 1]);
++    expect(r.path.screens).toEqual(["cart", "home"]);
++  });
++});
+diff --git a/tests/recovery-example.test.ts b/tests/recovery-example.test.ts
+index c720fea..8c2a16e 100644
+--- a/tests/recovery-example.test.ts
++++ b/tests/recovery-example.test.ts
+@@ -3,23 +3,21 @@ import { createTutorialTree, recoverExtraQuantity } from "../examples/recover-ex
+ 
+ describe("worked example: recover from extra quantity", () => {
+   it("presses Reduce Quantity four times, then returns to the tutorial step", () => {
+-    const [doIt, goBack] = recoverExtraQuantity(createTutorialTree(), "cart", 4);
+-    const last = doIt!.steps.at(-1)!;
+-    expect(last.kind).toBe("action");
+-    expect(last.actionNode).toBe("decrease_quantity");
+-    expect(last.actions).toMatchObject([{ type: "TAP", data: { target: "Reduce Quantity" }, repeat: 4 }]);
+-    expect(goBack!.steps.map((s) => [s.from, s.to, s.kind])).toEqual([
+-      ["decrease_quantity", "cart", "navigate"],
+-      ["cart", "tutorial_end", "navigate"],
++    const out = recoverExtraQuantity(createTutorialTree(), "cart", 4);
++    expect(out.steps.map((s) => [s.leg, s.from, s.to, s.kind])).toEqual([
++      [0, "cart", "decrease_quantity", "action"],
++      [1, "decrease_quantity", "cart", "navigate"],
++      [1, "cart", "tutorial_end", "navigate"],
+     ]);
+-    expect(goBack!.steps[0]!.actions).toEqual([]);
+-    expect(goBack!.steps.at(-1)!.actions[0]).toMatchObject({ type: "TAP", data: { target: "Checkout" } });
++    expect(out.steps[0]!.actions).toMatchObject([{ type: "TAP", data: { target: "Reduce Quantity" }, repeat: 4 }]);
++    expect(out.steps[1]!.actions).toEqual([]);
++    expect(out.steps[2]!.actions[0]).toMatchObject({ type: "TAP", data: { target: "Checkout" } });
+   });
+ 
+   it("plans from whatever screen the app passes in, and the count follows the cart", () => {
+     const tree = createTutorialTree();
+-    const [a] = recoverExtraQuantity(tree, "cart", 2);
+-    expect(a!.steps.at(-1)!.actions[0]!.repeat).toBe(2);
++    expect(recoverExtraQuantity(tree, "cart", 2).steps[0]!.actions[0]!.repeat).toBe(2);
+     expect(() => recoverExtraQuantity(tree, "cart", 0)).toThrow();
++    expect(() => recoverExtraQuantity(tree, "nowhere", 1)).toThrow(/nowhere/);
+   });
+ });
+-- 
+2.43.0
+

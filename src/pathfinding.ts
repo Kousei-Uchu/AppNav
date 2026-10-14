@@ -55,6 +55,15 @@ export interface PathOptions {
   strictVariables?: boolean;
 }
 
+/** One leg of a route planned with `planRoute`. `leg` is a 0-based index. */
+export interface PathLeg {
+  readonly leg: number;
+  readonly from: string;
+  readonly to: string;
+  /** Number of edges (steps) in this leg. Zero when the leg starts where it ends. */
+  readonly steps: number;
+}
+
 export interface Path {
   readonly from: string;
   readonly to: string;
@@ -67,6 +76,8 @@ export interface Path {
   readonly visited: number;
   /** Route variables supplied to calculatePath. */
   readonly variables: Record<string, JsonValue>;
+  /** Leg boundaries, present only on paths made by `planRoute`. */
+  readonly legs?: readonly PathLeg[];
   /** Owning tree (not enumerable, so JSON.stringify(path) stays clean). */
   readonly tree: NavigationTree;
 }
