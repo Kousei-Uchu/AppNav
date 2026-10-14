@@ -327,6 +327,8 @@ Notes:
       "n": 1,
       "from": "home",
       "to": "shop",
+      "toName": "Shop",
+      "kind": "navigate",
       "edge": "home->shop",
       "cost": 1,
       "actions": [
@@ -340,6 +342,16 @@ Notes:
   "meta": { "app": "Example Store", "algorithm": "astar", "generator": "routegraph" }
 }
 ```
+
+Each step says what kind of step it is, so an app can tell "go there" from "do this" without a second lookup:
+
+| Field | Meaning |
+| --- | --- |
+| `kind` | `"navigate"` when the step arrives at a screen, `"action"` when it arrives at an action node. |
+| `actionNode` | Only on action steps: the id of the action node, such as `remove_item:product_2`. |
+| `toName` | Display name of the screen or node the step arrives at. |
+
+A step into an action node carries the actions to perform (see Dynamic registration), so a step with `kind: "action"` is the one to show as "do this". The step that leaves an action node again is `"navigate"` with no actions. The three fields are optional in the `InstructionStep` type, so steps built by hand and older consumers keep working. The builder always sets `kind` and `toName`.
 
 It is ordinary JSON. An action that declares a `repeat` carries the resolved count as `repeat`; other actions have no such field. Options for `buildInstructions`: `variables`, `runtime`, `extensions`, `extensionVariables`, `onError`, `includeUnresolved` (keeps the original payload on each action as `unresolved`, handy for debugging), and `strictVariables`.
 

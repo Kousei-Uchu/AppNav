@@ -64,8 +64,9 @@ Pathfinding (always synchronous)
 
 Instructions
 - `buildInstructions(path, opts)` always async. `buildInstructionsSync(path, opts)` throws `AsyncExtensionError` if a hook returns a promise.
-- Output: `{ from, to, path, steps: [{ n, from, to, edge, cost, actions: [{ type, data, repeat?, extensions }], extensions }], cost, extensions, meta }`.
+- Output: `{ from, to, path, steps: [{ n, from, to, toName, kind: "navigate" | "action", actionNode?, edge, cost, actions: [{ type, data, repeat?, extensions }], extensions }], cost, extensions, meta }`.
 - Options: `variables`, `runtime`, `extensions`, `extensionVariables`, `onError: "throw" | "collect"`, `includeUnresolved`, `strictVariables`.
+- `step.kind` is `"action"` when the step arrives at an action node (`step.actionNode` is its id) and `"navigate"` otherwise. `step.toName` is the arrival screen's display name. They are optional in the type but always set by the builder.
 - `isAction(action, "TAP")` narrows the payload type.
 
 Extensions (data added during generation, namespaced under `extensions[name]`)

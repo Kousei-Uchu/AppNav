@@ -1,0 +1,273 @@
+From ab4686e1ee956f6363345c1d8160b00a8f21e294 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 14 Oct 2026 13:44:15 +1100
+Subject: [PATCH] Tell "do this" from "go there" in instruction steps (issue 6)
+
+`kind: "action"` lived in screen metadata and never reached the output, so
+an app could not tell an action step from a navigation step, or word a step
+without looking the screen up again.
+
+- InstructionStep gains `kind` ("navigate" | "action"), `actionNode` (the
+  node id, action steps only) and `toName` (arrival display name).
+- The fields are optional in the type so hand built steps and older
+  consumers keep working; the builder always sets kind and toName.
+- A step into an action node is the "action" step and carries the actions
+  (issue 4). The step back out is "navigate".
+- Exports the StepKind type. Tests, README, llms.txt, AGENTS.md and
+  CHANGELOG updated.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Xc76J2b393T2P28QKDsk2x
+---
+ AGENTS.md                  |  1 +
+ CHANGELOG.md               |  1 +
+ README.md                  | 12 ++++++++
+ llms.txt                   |  3 +-
+ src/index.ts               |  1 +
+ src/instructions.ts        | 59 +++++++++++++++++++++++------------
+ tests/instructions.test.ts | 63 +++++++++++++++++++++++++++++++++++++-
+ 7 files changed, 118 insertions(+), 22 deletions(-)
+
+diff --git a/AGENTS.md b/AGENTS.md
+index 84527e4..5eeb893 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -31,6 +31,7 @@ Checklist when writing code against the API:
+ - React Native: use `indexTreeFromText` with bundled text, or pass `readFile` to `indexTree`.
+ - Extensions are local trusted code passed in `buildInstructions(path, { extensions })`. Never place code in a `.navgraph`.
+ - Use `tryCalculatePath` when "no route" is an expected outcome.
++- Instruction steps carry `kind` (`"navigate"` or `"action"`), `toName`, and for action steps `actionNode`. Use them to word instructions instead of looking screens up again.
+ 
+ ## Part 2: Working on this repository
+ 
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 918a7db..bce02f2 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -15,6 +15,7 @@ Keep a Changelog and the project follows semantic versioning.
+ - Registering an id that already exists is now an error instead of being ignored silently. Added `onDuplicate: "error" | "skip" | "replace"`.
+ - Action nodes now perform the action on the way in. `registerActions` puts the actions on the edge into the node and makes the edge back to the parent (or `to`) empty with cost 0, so a route that ends at an action node ends with the action. Before, the actions sat on the edge leaving the node and a route to the node told the user to do nothing. Graph files should write `ACTION` nodes the same way.
+ - Added a repeat count for actions. `DO TAP { ... } repeat=4`, or `repeat=$NAME$` for a number variable the app supplies, and `{ type, data, repeat }` for registered actions. The instruction action carries `repeat` (only when declared), so an app can show "x4" without duplicated steps. Validation rejects counts that are not whole numbers of at least 1 (`INVALID_REPEAT`), and a variable that resolves to a bad count throws a `VariableError`. The runtime runs a repeated action's handler once per repetition and passes `iteration` and `iterations`.
++- Instruction steps now say what they are. `step.kind` is `"navigate"` or `"action"` (arrival at an action node), `step.actionNode` names the node for action steps, and `step.toName` is the arrival screen's display name. The fields are optional in the type and always set by the builder.
+ - Edge ids for registered edges are deterministic, with no random suffix.
+ - Removed the `MutableGraphData` type. The no-tree form of `register_screens` no longer builds an empty tree, and now uses the default tree.
+ 
+diff --git a/README.md b/README.md
+index 31e3fa1..b52c48b 100644
+--- a/README.md
++++ b/README.md
+@@ -327,6 +327,8 @@ Notes:
+       "n": 1,
+       "from": "home",
+       "to": "shop",
++      "toName": "Shop",
++      "kind": "navigate",
+       "edge": "home->shop",
+       "cost": 1,
+       "actions": [
+@@ -341,6 +343,16 @@ Notes:
+ }
+ ```
+ 
++Each step says what kind of step it is, so an app can tell "go there" from "do this" without a second lookup:
++
++| Field | Meaning |
++| --- | --- |
++| `kind` | `"navigate"` when the step arrives at a screen, `"action"` when it arrives at an action node. |
++| `actionNode` | Only on action steps: the id of the action node, such as `remove_item:product_2`. |
++| `toName` | Display name of the screen or node the step arrives at. |
++
++A step into an action node carries the actions to perform (see Dynamic registration), so a step with `kind: "action"` is the one to show as "do this". The step that leaves an action node again is `"navigate"` with no actions. The three fields are optional in the `InstructionStep` type, so steps built by hand and older consumers keep working. The builder always sets `kind` and `toName`.
++
+ It is ordinary JSON. An action that declares a `repeat` carries the resolved count as `repeat`; other actions have no such field. Options for `buildInstructions`: `variables`, `runtime`, `extensions`, `extensionVariables`, `onError`, `includeUnresolved` (keeps the original payload on each action as `unresolved`, handy for debugging), and `strictVariables`.
+ 
+ Narrow actions with `isAction`:
+diff --git a/llms.txt b/llms.txt
+index 2d92f7f..c673d6d 100644
+--- a/llms.txt
++++ b/llms.txt
+@@ -64,8 +64,9 @@ Pathfinding (always synchronous)
+ 
+ Instructions
+ - `buildInstructions(path, opts)` always async. `buildInstructionsSync(path, opts)` throws `AsyncExtensionError` if a hook returns a promise.
+-- Output: `{ from, to, path, steps: [{ n, from, to, edge, cost, actions: [{ type, data, repeat?, extensions }], extensions }], cost, extensions, meta }`.
++- Output: `{ from, to, path, steps: [{ n, from, to, toName, kind: "navigate" | "action", actionNode?, edge, cost, actions: [{ type, data, repeat?, extensions }], extensions }], cost, extensions, meta }`.
+ - Options: `variables`, `runtime`, `extensions`, `extensionVariables`, `onError: "throw" | "collect"`, `includeUnresolved`, `strictVariables`.
++- `step.kind` is `"action"` when the step arrives at an action node (`step.actionNode` is its id) and `"navigate"` otherwise. `step.toName` is the arrival screen's display name. They are optional in the type but always set by the builder.
+ - `isAction(action, "TAP")` narrows the payload type.
+ 
+ Extensions (data added during generation, namespaced under `extensions[name]`)
+diff --git a/src/index.ts b/src/index.ts
+index 047604a..9129fb0 100644
+--- a/src/index.ts
++++ b/src/index.ts
+@@ -77,6 +77,7 @@ export {
+   type BuildOptions,
+   type InstructionAction,
+   type InstructionStep,
++  type StepKind,
+   type Instructions,
+ } from "./instructions";
+ export {
+diff --git a/src/instructions.ts b/src/instructions.ts
+index b1ddbc6..3dfdb0e 100644
+--- a/src/instructions.ts
++++ b/src/instructions.ts
+@@ -26,10 +26,22 @@ export interface InstructionAction<T extends string = string, D extends JsonObje
+   unresolved?: JsonObject;
+ }
+ 
++/** "action" when the step arrives at an action node (the app does something), "navigate" otherwise (the app goes somewhere). */
++export type StepKind = "navigate" | "action";
++
+ export interface InstructionStep {
+   n: number;
+   from: string;
+   to: string;
++  /**
++   * Display name of the screen the step arrives at, so instructions can be
++   * written without a second lookup. Always set by the builder.
++   */
++  toName?: string;
++  /** Whether the step navigates to a screen or performs an action. Always set by the builder. */
++  kind?: StepKind;
++  /** For action steps, the id of the action node the step arrives at, such as `remove_item:product_2`. */
++  actionNode?: string;
+   /** Id of the graph edge this step traverses. */
+   edge: string;
+   cost: number;
+@@ -135,26 +147,33 @@ function* generate(path: Path, options: BuildOptions): Job<Instructions> {
+   });
+ 
+   // 1. Resolve every payload up front so variable errors surface before any extension runs.
+-  const steps: InstructionStep[] = path.edges.map((edge: Edge, i: number) => ({
+-    n: i + 1,
+-    from: edge.from,
+-    to: edge.to,
+-    edge: edge.id,
+-    cost: edge.cost,
+-    actions: edge.actions.map((a, ai): InstructionAction => {
+-      const repeat = resolveRepeat(a.repeat, scope, tree.variables, [edge.id, a.type]);
+-      const action: InstructionAction = {
+-        type: a.type,
+-        data: resolveValue(a.data, scope, tree.variables, { ids: [edge.id, a.type] }) as JsonObject,
+-        ...(repeat !== undefined ? { repeat } : {}),
+-        extensions: {},
+-      };
+-      if (options.includeUnresolved) action.unresolved = cloneJson(a.data);
+-      void ai;
+-      return action;
+-    }),
+-    extensions: {},
+-  }));
++  const steps: InstructionStep[] = path.edges.map((edge: Edge, i: number): InstructionStep => {
++    const arrival = tree.screen(edge.to);
++    const isAction = arrival.meta.kind === "action";
++    return {
++      n: i + 1,
++      from: edge.from,
++      to: edge.to,
++      toName: arrival.name,
++      kind: isAction ? "action" : "navigate",
++      ...(isAction ? { actionNode: edge.to } : {}),
++      edge: edge.id,
++      cost: edge.cost,
++      actions: edge.actions.map((a, ai): InstructionAction => {
++        const repeat = resolveRepeat(a.repeat, scope, tree.variables, [edge.id, a.type]);
++        const action: InstructionAction = {
++          type: a.type,
++          data: resolveValue(a.data, scope, tree.variables, { ids: [edge.id, a.type] }) as JsonObject,
++          ...(repeat !== undefined ? { repeat } : {}),
++          extensions: {},
++        };
++        if (options.includeUnresolved) action.unresolved = cloneJson(a.data);
++        void ai;
++        return action;
++      }),
++      extensions: {},
++    };
++  });
+ 
+   const instructions: Instructions = {
+     from: path.from,
+diff --git a/tests/instructions.test.ts b/tests/instructions.test.ts
+index 3e35314..1c3c887 100644
+--- a/tests/instructions.test.ts
++++ b/tests/instructions.test.ts
+@@ -11,7 +11,7 @@ import {
+   indexTreeFromText,
+   isAction,
+ } from "../src";
+-import type { JsonObject } from "../src";
++import type { InstructionStep, JsonObject } from "../src";
+ import { exampleText } from "./helpers";
+ 
+ const tree = indexTreeFromText(exampleText("app.navgraph"));
+@@ -229,3 +229,64 @@ describe("extensions", () => {
+     expect(out.cost).toBe(p.cost);
+   });
+ });
++
++describe("step kind, action node and arrival name", () => {
++  const CART = `NAVGRAPH/2
++SCREEN home "Home"
++SCREEN cart "Shopping Cart"
++ACTION remove_item "Remove item"
++home -> cart { DO TAP { "target": "Cart" } }
++cart -> home { DO BACK {} }
++cart -> remove_item { DO SWIPE { "direction": "left" } }
++remove_item -> cart
++END`;
++  const cartTree = indexTreeFromText(CART);
++
++  it("marks screen arrivals as navigate and names the screen, with no actionNode", () => {
++    const out = buildInstructionsSync(calculatePath(cartTree, "home", "cart"));
++    expect(out.steps[0]).toMatchObject({ kind: "navigate", to: "cart", toName: "Shopping Cart" });
++    expect("actionNode" in (out.steps[0] as InstructionStep)).toBe(false);
++  });
++
++  it("marks arrival at an action node as an action step that names the node", () => {
++    const out = buildInstructionsSync(calculatePath(cartTree, "home", "remove_item"));
++    expect(out.steps.map((s) => s.kind)).toEqual(["navigate", "action"]);
++    const last = out.steps[1];
++    expect(last).toMatchObject({ to: "remove_item", toName: "Remove item", actionNode: "remove_item" });
++    expect(last?.actions.map((a) => a.type)).toEqual(["SWIPE"]);
++  });
++
++  it("treats the empty step back from an action node as navigation", () => {
++    const out = buildInstructionsSync(calculatePath(cartTree, "remove_item", "home"));
++    expect(out.path).toEqual(["remove_item", "cart", "home"]);
++    expect(out.steps[0]).toMatchObject({ kind: "navigate", toName: "Shopping Cart", actions: [] });
++  });
++
++  it("covers registered action nodes, including per item ids", () => {
++    const tree = indexTreeFromText(CART);
++    tree.registerActions("cart", { "remove_item:product_2": { name: "Remove product 2", actions: [{ type: "SWIPE", data: { direction: "left" } }] } });
++    const last = buildInstructionsSync(calculatePath(tree, "home", "remove_item:product_2")).steps.at(-1);
++    expect(last).toMatchObject({ kind: "action", actionNode: "remove_item:product_2", toName: "Remove product 2" });
++  });
++
++  it("is plain JSON and shows up in the output order callers read", () => {
++    const out = buildInstructionsSync(calculatePath(cartTree, "home", "remove_item"));
++    expect(JSON.parse(JSON.stringify(out))).toEqual(out);
++    expect(Object.keys(out.steps[1] as object)).toEqual(["n", "from", "to", "toName", "kind", "actionNode", "edge", "cost", "actions", "extensions"]);
++  });
++
++  it("stays optional in the type, so hand built steps and older consumers still work", () => {
++    const legacy: InstructionStep = { n: 1, from: "a", to: "b", edge: "a->b", cost: 1, actions: [], extensions: {} };
++    expect(legacy.kind).toBeUndefined();
++    expect(legacy.toName).toBeUndefined();
++  });
++
++  it("is visible to step extensions", async () => {
++    const seen = defineExtension({ name: "seen", step: ({ step }) => ({ kind: step.kind ?? null, node: step.actionNode ?? null }) });
++    const out = await buildInstructions(calculatePath(cartTree, "home", "remove_item"), { extensions: [seen] });
++    expect(out.steps.map((s) => s.extensions.seen)).toEqual([
++      { kind: "navigate", node: null },
++      { kind: "action", node: "remove_item" },
++    ]);
++  });
++});
+-- 
+2.43.0
+

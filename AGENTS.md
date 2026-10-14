@@ -31,6 +31,7 @@ Checklist when writing code against the API:
 - React Native: use `indexTreeFromText` with bundled text, or pass `readFile` to `indexTree`.
 - Extensions are local trusted code passed in `buildInstructions(path, { extensions })`. Never place code in a `.navgraph`.
 - Use `tryCalculatePath` when "no route" is an expected outcome.
+- Instruction steps carry `kind` (`"navigate"` or `"action"`), `toName`, and for action steps `actionNode`. Use them to word instructions instead of looking screens up again.
 
 ## Part 2: Working on this repository
 

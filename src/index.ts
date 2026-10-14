@@ -77,6 +77,7 @@ export {
   type BuildOptions,
   type InstructionAction,
   type InstructionStep,
+  type StepKind,
   type Instructions,
 } from "./instructions";
 export {

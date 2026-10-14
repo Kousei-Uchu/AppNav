@@ -11,7 +11,7 @@ import {
   indexTreeFromText,
   isAction,
 } from "../src";
-import type { JsonObject } from "../src";
+import type { InstructionStep, JsonObject } from "../src";
 import { exampleText } from "./helpers";
 
 const tree = indexTreeFromText(exampleText("app.navgraph"));
@@ -227,5 +227,66 @@ describe("extensions", () => {
     const out = await buildInstructions(p, { extensions: [narration] });
     expect(JSON.stringify(p)).toBe(before);
     expect(out.cost).toBe(p.cost);
+  });
+});
+
+describe("step kind, action node and arrival name", () => {
+  const CART = `NAVGRAPH/2
+SCREEN home "Home"
+SCREEN cart "Shopping Cart"
+ACTION remove_item "Remove item"
+home -> cart { DO TAP { "target": "Cart" } }
+cart -> home { DO BACK {} }
+cart -> remove_item { DO SWIPE { "direction": "left" } }
+remove_item -> cart
+END`;
+  const cartTree = indexTreeFromText(CART);
+
+  it("marks screen arrivals as navigate and names the screen, with no actionNode", () => {
+    const out = buildInstructionsSync(calculatePath(cartTree, "home", "cart"));
+    expect(out.steps[0]).toMatchObject({ kind: "navigate", to: "cart", toName: "Shopping Cart" });
+    expect("actionNode" in (out.steps[0] as InstructionStep)).toBe(false);
+  });
+
+  it("marks arrival at an action node as an action step that names the node", () => {
+    const out = buildInstructionsSync(calculatePath(cartTree, "home", "remove_item"));
+    expect(out.steps.map((s) => s.kind)).toEqual(["navigate", "action"]);
+    const last = out.steps[1];
+    expect(last).toMatchObject({ to: "remove_item", toName: "Remove item", actionNode: "remove_item" });
+    expect(last?.actions.map((a) => a.type)).toEqual(["SWIPE"]);
+  });
+
+  it("treats the empty step back from an action node as navigation", () => {
+    const out = buildInstructionsSync(calculatePath(cartTree, "remove_item", "home"));
+    expect(out.path).toEqual(["remove_item", "cart", "home"]);
+    expect(out.steps[0]).toMatchObject({ kind: "navigate", toName: "Shopping Cart", actions: [] });
+  });
+
+  it("covers registered action nodes, including per item ids", () => {
+    const tree = indexTreeFromText(CART);
+    tree.registerActions("cart", { "remove_item:product_2": { name: "Remove product 2", actions: [{ type: "SWIPE", data: { direction: "left" } }] } });
+    const last = buildInstructionsSync(calculatePath(tree, "home", "remove_item:product_2")).steps.at(-1);
+    expect(last).toMatchObject({ kind: "action", actionNode: "remove_item:product_2", toName: "Remove product 2" });
+  });
+
+  it("is plain JSON and shows up in the output order callers read", () => {
+    const out = buildInstructionsSync(calculatePath(cartTree, "home", "remove_item"));
+    expect(JSON.parse(JSON.stringify(out))).toEqual(out);
+    expect(Object.keys(out.steps[1] as object)).toEqual(["n", "from", "to", "toName", "kind", "actionNode", "edge", "cost", "actions", "extensions"]);
+  });
+
+  it("stays optional in the type, so hand built steps and older consumers still work", () => {
+    const legacy: InstructionStep = { n: 1, from: "a", to: "b", edge: "a->b", cost: 1, actions: [], extensions: {} };
+    expect(legacy.kind).toBeUndefined();
+    expect(legacy.toName).toBeUndefined();
+  });
+
+  it("is visible to step extensions", async () => {
+    const seen = defineExtension({ name: "seen", step: ({ step }) => ({ kind: step.kind ?? null, node: step.actionNode ?? null }) });
+    const out = await buildInstructions(calculatePath(cartTree, "home", "remove_item"), { extensions: [seen] });
+    expect(out.steps.map((s) => s.extensions.seen)).toEqual([
+      { kind: "navigate", node: null },
+      { kind: "action", node: "remove_item" },
+    ]);
   });
 });

@@ -26,10 +26,22 @@ export interface InstructionAction<T extends string = string, D extends JsonObje
   unresolved?: JsonObject;
 }
 
+/** "action" when the step arrives at an action node (the app does something), "navigate" otherwise (the app goes somewhere). */
+export type StepKind = "navigate" | "action";
+
 export interface InstructionStep {
   n: number;
   from: string;
   to: string;
+  /**
+   * Display name of the screen the step arrives at, so instructions can be
+   * written without a second lookup. Always set by the builder.
+   */
+  toName?: string;
+  /** Whether the step navigates to a screen or performs an action. Always set by the builder. */
+  kind?: StepKind;
+  /** For action steps, the id of the action node the step arrives at, such as `remove_item:product_2`. */
+  actionNode?: string;
   /** Id of the graph edge this step traverses. */
   edge: string;
   cost: number;
@@ -135,26 +147,33 @@ function* generate(path: Path, options: BuildOptions): Job<Instructions> {
   });
 
   // 1. Resolve every payload up front so variable errors surface before any extension runs.
-  const steps: InstructionStep[] = path.edges.map((edge: Edge, i: number) => ({
-    n: i + 1,
-    from: edge.from,
-    to: edge.to,
-    edge: edge.id,
-    cost: edge.cost,
-    actions: edge.actions.map((a, ai): InstructionAction => {
-      const repeat = resolveRepeat(a.repeat, scope, tree.variables, [edge.id, a.type]);
-      const action: InstructionAction = {
-        type: a.type,
-        data: resolveValue(a.data, scope, tree.variables, { ids: [edge.id, a.type] }) as JsonObject,
-        ...(repeat !== undefined ? { repeat } : {}),
-        extensions: {},
-      };
-      if (options.includeUnresolved) action.unresolved = cloneJson(a.data);
-      void ai;
-      return action;
-    }),
-    extensions: {},
-  }));
+  const steps: InstructionStep[] = path.edges.map((edge: Edge, i: number): InstructionStep => {
+    const arrival = tree.screen(edge.to);
+    const isAction = arrival.meta.kind === "action";
+    return {
+      n: i + 1,
+      from: edge.from,
+      to: edge.to,
+      toName: arrival.name,
+      kind: isAction ? "action" : "navigate",
+      ...(isAction ? { actionNode: edge.to } : {}),
+      edge: edge.id,
+      cost: edge.cost,
+      actions: edge.actions.map((a, ai): InstructionAction => {
+        const repeat = resolveRepeat(a.repeat, scope, tree.variables, [edge.id, a.type]);
+        const action: InstructionAction = {
+          type: a.type,
+          data: resolveValue(a.data, scope, tree.variables, { ids: [edge.id, a.type] }) as JsonObject,
+          ...(repeat !== undefined ? { repeat } : {}),
+          extensions: {},
+        };
+        if (options.includeUnresolved) action.unresolved = cloneJson(a.data);
+        void ai;
+        return action;
+      }),
+      extensions: {},
+    };
+  });
 
   const instructions: Instructions = {
     from: path.from,
