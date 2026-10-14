@@ -2,7 +2,7 @@
   "name": "routegraph-vscode",
   "displayName": "RouteGraph",
   "description": "Language support for .navgraph files: live validation, hover and go to definition, an interactive graph preview, and route finding.",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "publisher": "kousei-uchu",
   "license": "MIT",
   "private": true,
