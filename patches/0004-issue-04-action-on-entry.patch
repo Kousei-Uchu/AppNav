@@ -1,0 +1,223 @@
+From f3b788fbe72a2ebbdbc018b2b132138b3b406411 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 14 Oct 2026 13:39:45 +1100
+Subject: [PATCH] Perform action nodes' actions on the way in (issue 4)
+
+registerActions put the actions on the edge leaving the action node, so a
+route whose goal was an action node ended on an empty step and told the user
+to do nothing.
+
+- The actions now sit on the edge into the node. Arriving at the node means
+  the action was performed.
+- The edge out of the node (to the parent, or to `to`) is empty and costs 0,
+  so a later route can continue from the node without extra work.
+- ACTION nodes in graph files follow the same convention; README example
+  updated.
+- Tests: a route from home to an action node ends with the swipe, the edge
+  back is empty and free, continuing from the node, and the file form.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Xc76J2b393T2P28QKDsk2x
+---
+ AGENTS.md             |  1 +
+ CHANGELOG.md          |  1 +
+ README.md             | 13 +++++++---
+ llms.txt              |  2 +-
+ src/dynamic.ts        | 17 ++++++++-----
+ tests/dynamic.test.ts | 55 ++++++++++++++++++++++++++++++++++++++++++-
+ 6 files changed, 78 insertions(+), 11 deletions(-)
+
+diff --git a/AGENTS.md b/AGENTS.md
+index dda2b0a..95cfb3f 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -21,6 +21,7 @@ Checklist when writing code against the API (dynamic graphs):
+ - Added items are flagged `dynamic`. Remove them with `unregisterScreens`, `unregisterEdges` or `clearDynamic`. File items cannot be removed.
+ - Registered screens, edges and actions are validated like a parsed graph. Action types must exist in the tree's schema. Failures throw `ValidationError`; `{ diagnostics: "collect" }` keeps the valid items instead.
+ - `registerActions(screen, { name: { actions: [...] } })` needs a name per action. Duplicate ids error unless `onDuplicate` is `"skip"` or `"replace"`.
++- Action nodes perform their actions on the edge into the node (`cart -> remove_item`). The edge back is empty and free. Write `ACTION` nodes in files the same way.
+ - Template copies clone incident edges when `cloneEdges` is true. A registration call is all or nothing.
+ 
+ Checklist when writing code against the API:
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 1cae0b9..8ad817a 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -13,6 +13,7 @@ Keep a Changelog and the project follows semantic versioning.
+ - Exposed `validateScreenRecord` and `validateEdgeRecord`, the per-item checks behind `validateGraph`.
+ - `registerActions` now requires a name per action (`registerActions(screen, { remove_item: { actions } })`). The name is the node id, so actions on one screen no longer share a default id or pile up duplicate edges. The old bare-array form is rejected.
+ - Registering an id that already exists is now an error instead of being ignored silently. Added `onDuplicate: "error" | "skip" | "replace"`.
++- Action nodes now perform the action on the way in. `registerActions` puts the actions on the edge into the node and makes the edge back to the parent (or `to`) empty with cost 0, so a route that ends at an action node ends with the action. Before, the actions sat on the edge leaving the node and a route to the node told the user to do nothing. Graph files should write `ACTION` nodes the same way.
+ - Edge ids for registered edges are deterministic, with no random suffix.
+ - Removed the `MutableGraphData` type. The no-tree form of `register_screens` no longer builds an empty tree, and now uses the default tree.
+ 
+diff --git a/README.md b/README.md
+index e2a012f..1863ae4 100644
+--- a/README.md
++++ b/README.md
+@@ -473,10 +473,12 @@ Static action nodes are supported too, both in files and at runtime:
+ 
+ ```text
+ ACTION remove_item "Remove item"
+-cart -> remove_item { DO TAP { "target": "Item row" } }
+-remove_item -> cart { DO SWIPE { "direction": "left" } }
++cart -> remove_item { DO SWIPE { "direction": "left" } }
++remove_item -> cart
+ ```
+ 
++The actions sit on the edge into the node, so arriving at the node means the action was performed. A route that ends at `remove_item` ends with the swipe. The edge back to the parent is empty, so a later route can carry on from the node without doing anything extra.
++
+ `registerActions` creates action nodes and the transitions around them. Every action needs a name, which becomes the id of its node, so two actions on one screen never collide:
+ 
+ ```ts
+@@ -486,7 +488,12 @@ registerActions("cart", {
+ });
+ ```
+ 
+-Each action accepts `name`, `actions`, `to` (the screen you end on, default the parent) and `cost` (of the transition into it, default 1). An unnamed action, such as a bare array, is rejected with an error that shows the call to use.
++Each action accepts `name`, `actions`, `to` (the screen you end on, default the parent) and `cost` (of the transition into the node, which is where the actions run, default 1). The edge out of the node goes to `to`, has no actions and costs 0. If `to` is another screen, the node acts as a transition that performs the actions first. An unnamed action, such as a bare array, is rejected with an error that shows the call to use.
++
++```ts
++const out = buildInstructionsSync(calculatePath(tree, "home", "remove_item"));
++// path: home, cart, remove_item. The last step carries the SWIPE.
++```
+ 
+ ## Automatic mapping (optional)
+ 
+diff --git a/llms.txt b/llms.txt
+index 83d8e12..d1acf58 100644
+--- a/llms.txt
++++ b/llms.txt
+@@ -91,7 +91,7 @@ Errors: all extend `AppNavError` with `code`, and `file`, `line`, `column`, `ids
+ 
+ ## Dynamic registration
+ - Registration changes a live tree in place and returns it. Flags added items `dynamic: true`. One shared tree: `setDefaultTree(tree)` or `indexTreeFromText(text, { setAsDefault: true })`.
+-- `registerScreens([tree,] ids, template?)` clones the template screen as `template:id` and copies the edges touching it. `registerEdges([tree,] edges)`, `registerActions([tree,] screenId, { name: { actions: [...], to?, cost? } })` (every action must be named; the name is the node id). Also methods on the tree and snake_case aliases (`register_screens`).
++- `registerScreens([tree,] ids, template?)` clones the template screen as `template:id` and copies the edges touching it. `registerEdges([tree,] edges)`, `registerActions([tree,] screenId, { name: { actions: [...], to?, cost? } })` (every action must be named; the name is the node id). The actions run on the edge into the node, so a route to the node ends with the action; the edge out is empty and costs 0. Also methods on the tree and snake_case aliases (`register_screens`).
+ - Remove with `unregisterScreens(idOrIdsOrTemplate)`, `unregisterEdges(ids)`, `clearDynamic()`. File screens and edges cannot be removed.
+ - Existing ids are an error by default. `{ onDuplicate: "skip" | "replace" }` changes that (dynamic items only).
+ - `createTree()` makes an empty tree. `cloneTree(tree)` makes an independent copy.
+diff --git a/src/dynamic.ts b/src/dynamic.ts
+index 7d2afc1..05dd554 100644
+--- a/src/dynamic.ts
++++ b/src/dynamic.ts
+@@ -66,11 +66,11 @@ export interface RegisterOptions extends ValidateOptions {
+ export interface ActionSpec {
+   /** Display name. Defaults to the action's own name. */
+   name?: string;
+-  /** Actions performed by the transition. */
++  /** Actions performed on the way into the node. */
+   actions: ReadonlyArray<{ type: string; data?: JsonObject }>;
+   /** Screen the app is on after the action. Default: the parent screen. */
+   to?: string;
+-  /** Cost of the transition into the action. Default 1. */
++  /** Cost of the transition into the node, which is where the actions run. Default 1. */
+   cost?: number;
+   meta?: JsonObject;
+ }
+@@ -407,11 +407,14 @@ function stageActions(st: Stage, parent: string, input: unknown, options: Regist
+       index: st.nextScreen++,
+       dynamic: true,
+     });
++    // The actions sit on the edge into the node, so arriving at the node means the
++    // action was performed. The edge out is empty and free: it only moves the app
++    // on to `destination` when a route has to continue past the node.
+     stageEdges(
+       st,
+       [
+-        { from: parent, to: name, cost: typeof spec.cost === "number" ? spec.cost : 1, actions: [] },
+-        { from: name, to: destination, actions: spec.actions },
++        { from: parent, to: name, cost: typeof spec.cost === "number" ? spec.cost : 1, actions: spec.actions },
++        { from: name, to: destination, cost: 0, actions: [] },
+       ],
+       options,
+     );
+@@ -420,8 +423,10 @@ function stageActions(st: Stage, parent: string, input: unknown, options: Regist
+ 
+ /**
+  * Register action nodes under a screen, in place. Each key is the name (and id)
+- * of one action node: the parent screen gets an edge to the node, and the node
+- * gets an edge to `to` (default the parent) carrying the actions.
++ * of one action node. The parent screen gets an edge into the node that carries
++ * the actions, so a route that ends at the node ends with the action. The node
++ * gets an empty, zero cost edge to `to` (default the parent), which lets a
++ * later route continue from the node.
+  *
+  * `registerActions("cart", { remove_item: { actions: [{ type: "SWIPE", data: { direction: "left" } }] } })`
+  *
+diff --git a/tests/dynamic.test.ts b/tests/dynamic.test.ts
+index 5ed0612..6c98b69 100644
+--- a/tests/dynamic.test.ts
++++ b/tests/dynamic.test.ts
+@@ -342,6 +342,59 @@ describe("named actions", () => {
+   });
+ });
+ 
++describe("action nodes perform the action on the way in", () => {
++  const swipe = { type: "SWIPE", data: { direction: "left" } };
++
++  it("a route to an action node ends in a step that carries the action", () => {
++    const tree = indexTreeFromText(BASE);
++    tree.registerActions("cart", { remove_item: { actions: [swipe] } });
++    const out = buildInstructionsSync(calculatePath(tree, "home", "remove_item"));
++    expect(out.path).toEqual(["home", "cart", "remove_item"]);
++    const last = out.steps[out.steps.length - 1];
++    expect(last?.to).toBe("remove_item");
++    expect(last?.actions.map((a) => a.type)).toEqual(["SWIPE"]);
++    expect(last?.actions[0]?.data).toEqual({ direction: "left" });
++  });
++
++  it("puts the actions on the edge into the node and leaves the edge back empty and free", () => {
++    const tree = indexTreeFromText(BASE);
++    tree.registerActions("cart", { remove_item: { actions: [swipe], cost: 2 } });
++    expect(tree.edge("cart->remove_item")).toMatchObject({ cost: 2, actions: [{ type: "SWIPE" }] });
++    expect(tree.edge("remove_item->cart")).toMatchObject({ cost: 0, actions: [] });
++  });
++
++  it("a later route can continue from the node, and the first step back does nothing", () => {
++    const tree = indexTreeFromText(BASE);
++    tree.registerActions("cart", { remove_item: { actions: [swipe] } });
++    const out = buildInstructionsSync(calculatePath(tree, "remove_item", "done"));
++    expect(out.path).toEqual(["remove_item", "cart", "done"]);
++    expect(out.steps[0]?.actions).toEqual([]);
++    expect(out.steps[1]?.actions[0]?.type).toBe("TAP");
++    expect(out.cost).toBe(1);
++  });
++
++  it("an action node that leads to another screen performs the action, then moves on", () => {
++    const tree = indexTreeFromText(BASE);
++    tree.registerActions("cart", { open: { actions: [swipe], to: "item_settings", cost: 0.5 } });
++    const out = buildInstructionsSync(calculatePath(tree, "cart", "item_settings"));
++    expect(out.path).toEqual(["cart", "open", "item_settings"]);
++    expect(out.steps[0]?.actions.map((a) => a.type)).toEqual(["SWIPE"]);
++    expect(out.steps[1]?.actions).toEqual([]);
++  });
++
++  it("works the same for ACTION nodes written in a graph file", () => {
++    const tree = indexTreeFromText(`NAVGRAPH/2
++SCREEN cart "Cart"
++ACTION remove_item "Remove item"
++cart -> remove_item { DO SWIPE { "direction": "left" } }
++remove_item -> cart
++END`);
++    const out = buildInstructionsSync(calculatePath(tree, "cart", "remove_item"));
++    expect(out.steps).toHaveLength(1);
++    expect(out.steps[0]?.actions[0]?.type).toBe("SWIPE");
++  });
++});
++
+ describe("onDuplicate", () => {
+   it("errors by default when a screen id already exists", () => {
+     const tree = indexTreeFromText(BASE);
+@@ -371,7 +424,7 @@ describe("onDuplicate", () => {
+     const tree = indexTreeFromText(BASE);
+     tree.registerActions("cart", { remove_item: [{ type: "TAP", data: { target: "Old" } }] });
+     tree.registerActions("cart", { remove_item: [{ type: "TAP", data: { target: "New" } }] }, { onDuplicate: "replace" });
+-    expect(tree.outgoing("remove_item")[0]?.actions[0]?.data).toEqual({ target: "New" });
++    expect(tree.edge("cart->remove_item")?.actions[0]?.data).toEqual({ target: "New" });
+     expect(tree.edges.filter((e) => e.to === "remove_item")).toHaveLength(1);
+   });
+ 
+-- 
+2.43.0
+

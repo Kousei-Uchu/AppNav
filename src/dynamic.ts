@@ -66,11 +66,11 @@ export interface RegisterOptions extends ValidateOptions {
 export interface ActionSpec {
   /** Display name. Defaults to the action's own name. */
   name?: string;
-  /** Actions performed by the transition. */
+  /** Actions performed on the way into the node. */
   actions: ReadonlyArray<{ type: string; data?: JsonObject }>;
   /** Screen the app is on after the action. Default: the parent screen. */
   to?: string;
-  /** Cost of the transition into the action. Default 1. */
+  /** Cost of the transition into the node, which is where the actions run. Default 1. */
   cost?: number;
   meta?: JsonObject;
 }
@@ -407,11 +407,14 @@ function stageActions(st: Stage, parent: string, input: unknown, options: Regist
       index: st.nextScreen++,
       dynamic: true,
     });
+    // The actions sit on the edge into the node, so arriving at the node means the
+    // action was performed. The edge out is empty and free: it only moves the app
+    // on to `destination` when a route has to continue past the node.
     stageEdges(
       st,
       [
-        { from: parent, to: name, cost: typeof spec.cost === "number" ? spec.cost : 1, actions: [] },
-        { from: name, to: destination, actions: spec.actions },
+        { from: parent, to: name, cost: typeof spec.cost === "number" ? spec.cost : 1, actions: spec.actions },
+        { from: name, to: destination, cost: 0, actions: [] },
       ],
       options,
     );
@@ -420,8 +423,10 @@ function stageActions(st: Stage, parent: string, input: unknown, options: Regist
 
 /**
  * Register action nodes under a screen, in place. Each key is the name (and id)
- * of one action node: the parent screen gets an edge to the node, and the node
- * gets an edge to `to` (default the parent) carrying the actions.
+ * of one action node. The parent screen gets an edge into the node that carries
+ * the actions, so a route that ends at the node ends with the action. The node
+ * gets an empty, zero cost edge to `to` (default the parent), which lets a
+ * later route continue from the node.
  *
  * `registerActions("cart", { remove_item: { actions: [{ type: "SWIPE", data: { direction: "left" } }] } })`
  *

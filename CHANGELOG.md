@@ -13,6 +13,7 @@ Keep a Changelog and the project follows semantic versioning.
 - Exposed `validateScreenRecord` and `validateEdgeRecord`, the per-item checks behind `validateGraph`.
 - `registerActions` now requires a name per action (`registerActions(screen, { remove_item: { actions } })`). The name is the node id, so actions on one screen no longer share a default id or pile up duplicate edges. The old bare-array form is rejected.
 - Registering an id that already exists is now an error instead of being ignored silently. Added `onDuplicate: "error" | "skip" | "replace"`.
+- Action nodes now perform the action on the way in. `registerActions` puts the actions on the edge into the node and makes the edge back to the parent (or `to`) empty with cost 0, so a route that ends at an action node ends with the action. Before, the actions sat on the edge leaving the node and a route to the node told the user to do nothing. Graph files should write `ACTION` nodes the same way.
 - Edge ids for registered edges are deterministic, with no random suffix.
 - Removed the `MutableGraphData` type. The no-tree form of `register_screens` no longer builds an empty tree, and now uses the default tree.
 

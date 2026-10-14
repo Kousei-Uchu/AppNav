@@ -91,7 +91,7 @@ Errors: all extend `AppNavError` with `code`, and `file`, `line`, `column`, `ids
 
 ## Dynamic registration
 - Registration changes a live tree in place and returns it. Flags added items `dynamic: true`. One shared tree: `setDefaultTree(tree)` or `indexTreeFromText(text, { setAsDefault: true })`.
-- `registerScreens([tree,] ids, template?)` clones the template screen as `template:id` and copies the edges touching it. `registerEdges([tree,] edges)`, `registerActions([tree,] screenId, { name: { actions: [...], to?, cost? } })` (every action must be named; the name is the node id). Also methods on the tree and snake_case aliases (`register_screens`).
+- `registerScreens([tree,] ids, template?)` clones the template screen as `template:id` and copies the edges touching it. `registerEdges([tree,] edges)`, `registerActions([tree,] screenId, { name: { actions: [...], to?, cost? } })` (every action must be named; the name is the node id). The actions run on the edge into the node, so a route to the node ends with the action; the edge out is empty and costs 0. Also methods on the tree and snake_case aliases (`register_screens`).
 - Remove with `unregisterScreens(idOrIdsOrTemplate)`, `unregisterEdges(ids)`, `clearDynamic()`. File screens and edges cannot be removed.
 - Existing ids are an error by default. `{ onDuplicate: "skip" | "replace" }` changes that (dynamic items only).
 - `createTree()` makes an empty tree. `cloneTree(tree)` makes an independent copy.

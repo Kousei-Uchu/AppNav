@@ -342,6 +342,59 @@ describe("named actions", () => {
   });
 });
 
+describe("action nodes perform the action on the way in", () => {
+  const swipe = { type: "SWIPE", data: { direction: "left" } };
+
+  it("a route to an action node ends in a step that carries the action", () => {
+    const tree = indexTreeFromText(BASE);
+    tree.registerActions("cart", { remove_item: { actions: [swipe] } });
+    const out = buildInstructionsSync(calculatePath(tree, "home", "remove_item"));
+    expect(out.path).toEqual(["home", "cart", "remove_item"]);
+    const last = out.steps[out.steps.length - 1];
+    expect(last?.to).toBe("remove_item");
+    expect(last?.actions.map((a) => a.type)).toEqual(["SWIPE"]);
+    expect(last?.actions[0]?.data).toEqual({ direction: "left" });
+  });
+
+  it("puts the actions on the edge into the node and leaves the edge back empty and free", () => {
+    const tree = indexTreeFromText(BASE);
+    tree.registerActions("cart", { remove_item: { actions: [swipe], cost: 2 } });
+    expect(tree.edge("cart->remove_item")).toMatchObject({ cost: 2, actions: [{ type: "SWIPE" }] });
+    expect(tree.edge("remove_item->cart")).toMatchObject({ cost: 0, actions: [] });
+  });
+
+  it("a later route can continue from the node, and the first step back does nothing", () => {
+    const tree = indexTreeFromText(BASE);
+    tree.registerActions("cart", { remove_item: { actions: [swipe] } });
+    const out = buildInstructionsSync(calculatePath(tree, "remove_item", "done"));
+    expect(out.path).toEqual(["remove_item", "cart", "done"]);
+    expect(out.steps[0]?.actions).toEqual([]);
+    expect(out.steps[1]?.actions[0]?.type).toBe("TAP");
+    expect(out.cost).toBe(1);
+  });
+
+  it("an action node that leads to another screen performs the action, then moves on", () => {
+    const tree = indexTreeFromText(BASE);
+    tree.registerActions("cart", { open: { actions: [swipe], to: "item_settings", cost: 0.5 } });
+    const out = buildInstructionsSync(calculatePath(tree, "cart", "item_settings"));
+    expect(out.path).toEqual(["cart", "open", "item_settings"]);
+    expect(out.steps[0]?.actions.map((a) => a.type)).toEqual(["SWIPE"]);
+    expect(out.steps[1]?.actions).toEqual([]);
+  });
+
+  it("works the same for ACTION nodes written in a graph file", () => {
+    const tree = indexTreeFromText(`NAVGRAPH/2
+SCREEN cart "Cart"
+ACTION remove_item "Remove item"
+cart -> remove_item { DO SWIPE { "direction": "left" } }
+remove_item -> cart
+END`);
+    const out = buildInstructionsSync(calculatePath(tree, "cart", "remove_item"));
+    expect(out.steps).toHaveLength(1);
+    expect(out.steps[0]?.actions[0]?.type).toBe("SWIPE");
+  });
+});
+
 describe("onDuplicate", () => {
   it("errors by default when a screen id already exists", () => {
     const tree = indexTreeFromText(BASE);
@@ -371,7 +424,7 @@ describe("onDuplicate", () => {
     const tree = indexTreeFromText(BASE);
     tree.registerActions("cart", { remove_item: [{ type: "TAP", data: { target: "Old" } }] });
     tree.registerActions("cart", { remove_item: [{ type: "TAP", data: { target: "New" } }] }, { onDuplicate: "replace" });
-    expect(tree.outgoing("remove_item")[0]?.actions[0]?.data).toEqual({ target: "New" });
+    expect(tree.edge("cart->remove_item")?.actions[0]?.data).toEqual({ target: "New" });
     expect(tree.edges.filter((e) => e.to === "remove_item")).toHaveLength(1);
   });
 

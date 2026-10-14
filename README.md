@@ -473,9 +473,11 @@ Static action nodes are supported too, both in files and at runtime:
 
 ```text
 ACTION remove_item "Remove item"
-cart -> remove_item { DO TAP { "target": "Item row" } }
-remove_item -> cart { DO SWIPE { "direction": "left" } }
+cart -> remove_item { DO SWIPE { "direction": "left" } }
+remove_item -> cart
 ```
+
+The actions sit on the edge into the node, so arriving at the node means the action was performed. A route that ends at `remove_item` ends with the swipe. The edge back to the parent is empty, so a later route can carry on from the node without doing anything extra.
 
 `registerActions` creates action nodes and the transitions around them. Every action needs a name, which becomes the id of its node, so two actions on one screen never collide:
 
@@ -486,7 +488,12 @@ registerActions("cart", {
 });
 ```
 
-Each action accepts `name`, `actions`, `to` (the screen you end on, default the parent) and `cost` (of the transition into it, default 1). An unnamed action, such as a bare array, is rejected with an error that shows the call to use.
+Each action accepts `name`, `actions`, `to` (the screen you end on, default the parent) and `cost` (of the transition into the node, which is where the actions run, default 1). The edge out of the node goes to `to`, has no actions and costs 0. If `to` is another screen, the node acts as a transition that performs the actions first. An unnamed action, such as a bare array, is rejected with an error that shows the call to use.
+
+```ts
+const out = buildInstructionsSync(calculatePath(tree, "home", "remove_item"));
+// path: home, cart, remove_item. The last step carries the SWIPE.
+```
 
 ## Automatic mapping (optional)
 
