@@ -1,0 +1,738 @@
+From e537afa4825f3f1926600ea6d30524affa82d67e Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 14 Oct 2026 02:52:18 +0000
+Subject: [PATCH] Type the registration inputs, cut the aliases, split out dev
+ tooling (issue 9)
+
+Registration took many input shapes and silently dropped what it did not
+understand, there were dozens of alias names, and the README described a
+CLI that does not exist.
+
+- Each registration function now takes one documented, typed shape
+  (arrays of ids or { id } objects, arrays of { from, to } edges, a
+  name-to-spec map for actions) through overloads. Wrong shapes and
+  unknown keys fail with INVALID_REGISTRATION and the right call, in both
+  throw and collect mode, instead of being ignored.
+- Drop the cloneFrom/from synonyms for template.
+- Keep the canonical camelCase set, its snake_case mirror and the
+  matching instance methods. Remove every other alias, the DynamicTree
+  type, and the instance methods addScreens, addEdges and clone.
+- unregisterScreens/unregisterEdges reject selectors that are not ids.
+- Move the source scanner and NavGraphWatcher into packages/devtools, a
+  private package outside the published files. Fix scan-app.js, which had
+  stray shell lines and did not parse, and remove its unused --graph
+  option. Remove the scan script.
+- README, llms.txt, AGENTS.md and CHANGELOG describe the above; the false
+  CLI and diff claims are gone.
+---
+ AGENTS.md                                   |   2 +
+ CHANGELOG.md                                |   4 +
+ README.md                                   |  32 ++-
+ llms.txt                                    |   2 +-
+ package.json                                |   1 -
+ packages/devtools/README.md                 |  11 +
+ packages/devtools/package.json              |  10 +
+ {tools => packages/devtools}/scan-app.js    |   6 +-
+ {examples => packages/devtools}/watcher.tsx |   7 +-
+ src/dynamic.ts                              | 238 ++++++++++----------
+ tests/dynamic.test.ts                       |  79 ++++++-
+ 11 files changed, 258 insertions(+), 134 deletions(-)
+ create mode 100644 packages/devtools/README.md
+ create mode 100644 packages/devtools/package.json
+ rename {tools => packages/devtools}/scan-app.js (91%)
+ rename {examples => packages/devtools}/watcher.tsx (80%)
+
+diff --git a/AGENTS.md b/AGENTS.md
+index 5eeb893..65ea50a 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -19,6 +19,8 @@ Checklist when generating or editing a `.navgraph`:
+ Checklist when writing code against the API (dynamic graphs):
+ - Dynamic registration (`registerScreens`, `registerEdges`, `registerActions`) changes the tree in place and returns the same tree. Use `cloneTree` for an independent copy.
+ - Without a tree argument, registration uses the shared tree set by `setDefaultTree` or `setAsDefault: true`.
++- Use the canonical names only: `registerScreens`, `registerEdges`, `registerActions`, `unregisterScreens`, `unregisterEdges`, `clearDynamic`, `cloneTree`, `augmentTree`, or their snake_case twins. Do not invent or use aliases such as `addScreens` or `registerScreen`; they do not exist.
++- Inputs are arrays: `registerScreens(["p1"], "tpl")`, `registerEdges([{ from, to }])`. A map of screens or a single edge object is rejected with `INVALID_REGISTRATION`.
+ - Added items are flagged `dynamic`. Remove them with `unregisterScreens`, `unregisterEdges` or `clearDynamic`. File items cannot be removed.
+ - Registered screens, edges and actions are validated like a parsed graph. Action types must exist in the tree's schema. Failures throw `ValidationError`; `{ diagnostics: "collect" }` keeps the valid items instead.
+ - `registerActions(screen, { name: { actions: [...] } })` needs a name per action. Duplicate ids error unless `onDuplicate` is `"skip"` or `"replace"`.
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index bce02f2..fec10ab 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -17,6 +17,10 @@ Keep a Changelog and the project follows semantic versioning.
+ - Added a repeat count for actions. `DO TAP { ... } repeat=4`, or `repeat=$NAME$` for a number variable the app supplies, and `{ type, data, repeat }` for registered actions. The instruction action carries `repeat` (only when declared), so an app can show "x4" without duplicated steps. Validation rejects counts that are not whole numbers of at least 1 (`INVALID_REPEAT`), and a variable that resolves to a bad count throws a `VariableError`. The runtime runs a repeated action's handler once per repetition and passes `iteration` and `iterations`.
+ - Instruction steps now say what they are. `step.kind` is `"navigate"` or `"action"` (arrival at an action node), `step.actionNode` names the node for action steps, and `step.toName` is the arrival screen's display name. The fields are optional in the type and always set by the builder.
+ - Edge ids for registered edges are deterministic, with no random suffix.
++- Registration inputs are typed and take one shape each: an array of ids or `{ id, ... }` objects for screens, an array of `{ from, to, ... }` for edges, a name-to-spec map for actions. The old shapes (a map of screens, `{ screens }` objects, a bare id, a single edge object) and the `cloneFrom` and `from` synonyms for `template` are gone. Wrong shapes and unknown keys now fail with `INVALID_REGISTRATION` instead of being ignored.
++- Removed the extra aliases: `addScreens`, `addScreen`, `registerScreen`, `addEdges`, `addEdge`, `registerEdge`, `addActions`, `registerAction`, `registerTransition(s)`, `registerTemplate(s)`, `copyTree`, `forkTree`, `cloneNavigationTree`, the `DynamicTree` type, the `add_*` and singular snake_case names, and the instance methods `addScreens`, `addEdges` and `clone`. What remains is the canonical camelCase set, its snake_case mirror (`register_screens`, `register_edges`, `register_actions`, `unregister_screens`, `unregister_edges`, `clear_dynamic`, `clone_tree`) and the instance methods of the same names.
++- `unregisterScreens` and `unregisterEdges` throw `INVALID_REGISTRATION` for a selector that is not an id, an array of ids, or (screens only) `{ template }`.
++- Moved the source scanner and the `NavGraphWatcher` component out of the core package into `packages/devtools`, a separate private package. The scanner had stray shell lines at the end of the file and did not parse; fixed. Its unused `--graph` option is gone. The README no longer claims a CLI merge step or a diff, since neither existed. The `scan` npm script is removed.
+ - Removed the `MutableGraphData` type. The no-tree form of `register_screens` no longer builds an empty tree, and now uses the default tree.
+ 
+ ## 0.1.0
+diff --git a/README.md b/README.md
+index b52c48b..b6676f4 100644
+--- a/README.md
++++ b/README.md
+@@ -477,7 +477,28 @@ registerScreens(["product_1", "product_2"], "item_settings");
+ registerEdges([{ from: "cart", to: "cart", actions: [{ type: "TAP", data: { target: "Clear" } }] }]);
+ ```
+ 
+-Every registration function also accepts a tree as its first argument (`registerScreens(tree, ids, "item_settings")`), and the same calls exist as methods (`tree.registerScreens(ids, "item_settings")`) and in snake case (`register_screens`). Without a tree argument and without a default tree, the call throws an error that says how to set one. All of them return the tree they changed, so calls can be chained.
++Every registration function also accepts a tree as its first argument (`registerScreens(tree, ids, "item_settings")`). There is one canonical name per function, and each exists in three forms:
++
++| Function | Method on the tree | snake_case |
++| --- | --- | --- |
++| `registerScreens` | `tree.registerScreens(...)` | `register_screens` |
++| `registerEdges` | `tree.registerEdges(...)` | `register_edges` |
++| `registerActions` | `tree.registerActions(...)` | `register_actions` |
++| `unregisterScreens` | `tree.unregisterScreens(...)` | `unregister_screens` |
++| `unregisterEdges` | `tree.unregisterEdges(...)` | `unregister_edges` |
++| `clearDynamic` | `tree.clearDynamic()` | `clear_dynamic` |
++| `cloneTree` | `tree.cloneTree()` | `clone_tree` |
++
++`augmentTree(tree?, { template?, screens?, edges? })` applies screens and edges in one all-or-nothing call. There are no other aliases (no `addScreens`, `registerScreen`, `registerTransition`, `registerTemplate`, `copyTree` and so on). Without a tree argument and without a default tree, the call throws an error that says how to set one. All of them return the tree they changed, so calls can be chained.
++
++Each function takes one documented input shape, and the TypeScript types enforce it:
++
++- Screens: an array of ids or `{ id, name?, meta?, template?, cloneEdges? }` objects.
++- Edges: an array of `{ from, to, id?, cost?, condition?, meta?, actions? }` objects.
++- Actions: a screen id and a map from action name to `{ actions, name?, to?, cost?, meta? }` (or a bare array of actions).
++- Removal: an id, an array of ids, or `{ template }` for screens.
++
++Anything else, such as a map of screens, a single edge object, an unknown key, or a misspelt option, fails with an `INVALID_REGISTRATION` diagnostic that shows the right call. Nothing is dropped quietly.
+ 
+ How it behaves:
+ 
+@@ -540,14 +561,9 @@ const out = buildInstructionsSync(calculatePath(tree, "home", "remove_item"));
+ // path: home, cart, remove_item. The last step carries the SWIPE.
+ ```
+ 
+-## Automatic mapping (optional)
+-
+-A scanner and a watcher are provided as optional tooling:
+-
+-- `tools/scan-app.js`: scans source files for `navigation.navigate`, `router.push`, screen components, and action calls, emits a candidate `.navgraph` patch and a unified diff against an existing graph.
+-- `NavGraphWatcher` React component (see `examples/watcher.tsx`): wraps the root of an app, records screen/action transitions as you use it, and writes a local `.extend.navgraph` that can be merged through the CLI.
++## Development helpers (optional)
+ 
+-Both are opt-in and do not affect the core package size when unused.
++A source scanner and a click watcher live in `packages/devtools`, a separate private package that is not published with routegraph. See its README. The scanner proposes `SCREEN` lines from `navigation.navigate`, `router.push` and `<Stack.Screen>` calls. The watcher logs edge lines to the console. Neither merges anything for you, and routegraph itself ships no command line tool.
+ 
+ ## Development
+ 
+diff --git a/llms.txt b/llms.txt
+index c673d6d..c2e4598 100644
+--- a/llms.txt
++++ b/llms.txt
+@@ -93,7 +93,7 @@ Errors: all extend `AppNavError` with `code`, and `file`, `line`, `column`, `ids
+ 
+ ## Dynamic registration
+ - Registration changes a live tree in place and returns it. Flags added items `dynamic: true`. One shared tree: `setDefaultTree(tree)` or `indexTreeFromText(text, { setAsDefault: true })`.
+-- `registerScreens([tree,] ids, template?)` clones the template screen as `template:id` and copies the edges touching it. `registerEdges([tree,] edges)`, `registerActions([tree,] screenId, { name: { actions: [...], to?, cost? } })` (every action must be named; the name is the node id; an action may carry `repeat`). The actions run on the edge into the node, so a route to the node ends with the action; the edge out is empty and costs 0. Also methods on the tree and snake_case aliases (`register_screens`).
++- `registerScreens([tree,] ids, template?)` clones the template screen as `template:id` and copies the edges touching it. `registerEdges([tree,] edges)`, `registerActions([tree,] screenId, { name: { actions: [...], to?, cost? } })` (every action must be named; the name is the node id; an action may carry `repeat`). The actions run on the edge into the node, so a route to the node ends with the action; the edge out is empty and costs 0. Inputs are typed: screens are an array of ids or `{ id, name?, meta?, template?, cloneEdges? }`, edges an array of `{ from, to, id?, cost?, condition?, meta?, actions? }`; other shapes and unknown keys fail with `INVALID_REGISTRATION`. Each function is also a method on the tree and has one snake_case twin (`register_screens`, `register_edges`, `register_actions`, `unregister_screens`, `unregister_edges`, `clear_dynamic`, `clone_tree`). `augmentTree([tree,] { template?, screens?, edges? })` does both in one call. There are no other aliases (no `addScreens`, `registerScreen`, `copyTree`).
+ - Remove with `unregisterScreens(idOrIdsOrTemplate)`, `unregisterEdges(ids)`, `clearDynamic()`. File screens and edges cannot be removed.
+ - Existing ids are an error by default. `{ onDuplicate: "skip" | "replace" }` changes that (dynamic items only).
+ - `createTree()` makes an empty tree. `cloneTree(tree)` makes an independent copy.
+diff --git a/package.json b/package.json
+index 69313c8..b125c33 100644
+--- a/package.json
++++ b/package.json
+@@ -68,7 +68,6 @@
+     "typecheck": "tsc --noEmit -p tsconfig.json",
+     "test": "vitest run",
+     "test:watch": "vitest",
+-    "scan": "node tools/scan-app.js",
+     "clean": "rm -rf dist coverage",
+     "prepublishOnly": "npm run clean && npm run typecheck && npm test && npm run build"
+   },
+diff --git a/packages/devtools/README.md b/packages/devtools/README.md
+new file mode 100644
+index 0000000..b000e3b
+--- /dev/null
++++ b/packages/devtools/README.md
+@@ -0,0 +1,11 @@
++# routegraph-devtools
++
++Optional helpers that live outside the core `routegraph` package. Nothing here is published with it.
++
++- `scan-app.js` scans source files for `navigation.navigate(...)`, `router.push(...)` and `<Stack.Screen name="..." />`, and writes a proposed `.navgraph` fragment (default `proposed.extend.navgraph`) listing the screens it found. It does not read or diff an existing graph. Review the output and merge it by hand.
++
++  ```sh
++  node packages/devtools/scan-app.js src --out proposed.extend.navgraph
++  ```
++
++- `watcher.tsx` is a small React component, `NavGraphWatcher`. Wrap your app root in development and it logs an edge line to the console for each click on an element with a `data-screen` attribute. It writes no file. Copy the lines you want into your graph.
+diff --git a/packages/devtools/package.json b/packages/devtools/package.json
+new file mode 100644
+index 0000000..d58d045
+--- /dev/null
++++ b/packages/devtools/package.json
+@@ -0,0 +1,10 @@
++{
++  "name": "routegraph-devtools",
++  "version": "0.0.0",
++  "private": true,
++  "description": "Optional development helpers for routegraph. Not part of the core package.",
++  "license": "MIT",
++  "bin": {
++    "routegraph-scan": "./scan-app.js"
++  }
++}
+diff --git a/tools/scan-app.js b/packages/devtools/scan-app.js
+similarity index 91%
+rename from tools/scan-app.js
+rename to packages/devtools/scan-app.js
+index a6c7511..8a5a61e 100644
+--- a/tools/scan-app.js
++++ b/packages/devtools/scan-app.js
+@@ -1,14 +1,13 @@
+ #!/usr/bin/env node
+ /**
+  * Scans application source and proposes navigation edges/screens.
+- * Usage: node tools/scan-app.js <source-dir> [--graph app.navgraph] [--out proposed.extend.navgraph]
++ * Usage: node scan-app.js <source-dir> [--out proposed.extend.navgraph]
+  */
+ const fs = require("node:fs");
+ const path = require("node:path");
+ 
+ const args = process.argv.slice(2);
+ const srcDir = args.find((a) => !a.startsWith("--")) || "src";
+-const graphArg = argValue("--graph", "app.navgraph");
+ const outArg = argValue("--out", "proposed.extend.navgraph");
+ 
+ function argValue(name, fallback) {
+@@ -76,6 +75,3 @@ console.log(`Wrote ${outArg}`);
+ function sanitize(s) {
+   return String(s).replace(/[^A-Za-z0-9_.:-]/g, "_");
+ }
+-EOF
+-chmod +x tools/scan-app.js
+-node tools/scan-app.js . 2>&1 | tail -5
+\ No newline at end of file
+diff --git a/examples/watcher.tsx b/packages/devtools/watcher.tsx
+similarity index 80%
+rename from examples/watcher.tsx
+rename to packages/devtools/watcher.tsx
+index a9461b1..e9413cd 100644
+--- a/examples/watcher.tsx
++++ b/packages/devtools/watcher.tsx
+@@ -1,9 +1,10 @@
+ import React from "react";
+ 
+ /**
+- * NavGraphWatcher (optional): wrap your app root. In development it records
+- * screen transitions into a local extend graph. Persist it however your app
+- * prefers (download, send to dev server) and merge with the CLI.
++ * NavGraphWatcher (optional): wrap your app root. In development it logs a
++ * `.navgraph` edge line to the console for every click on an element with a
++ * `data-screen` attribute. It writes nothing to disk. Copy the lines you want
++ * into your graph by hand.
+  */
+ export function NavGraphWatcher({ children }: { children: React.ReactNode }) {
+   React.useEffect(() => {
+diff --git a/src/dynamic.ts b/src/dynamic.ts
+index 8b2f79e..0b73616 100644
+--- a/src/dynamic.ts
++++ b/src/dynamic.ts
+@@ -35,12 +35,21 @@ export interface ScreenSpec {
+   meta?: JsonObject;
+   /** Clone an existing screen instead of starting from scratch. */
+   template?: string;
+-  cloneFrom?: string;
+-  from?: string;
+   /** Copy edges incident to the template screen. Default true. */
+   cloneEdges?: boolean;
+ }
+ 
++/** A screen to register: a bare id, or an object when it needs a name, metadata or its own template. */
++export type ScreenInput = string | ScreenSpec;
++
++/** `{ template?, screens?, edges? }` applied in one call by `augmentTree`. */
++export interface TreePatch {
++  /** Default template for every entry in `screens` that does not name its own. */
++  template?: string;
++  screens?: ReadonlyArray<ScreenInput>;
++  edges?: ReadonlyArray<EdgeSpec>;
++}
++
+ export interface EdgeSpec {
+   from: string;
+   to: string;
+@@ -229,66 +238,66 @@ function cloneActions(actions: readonly ActionDeclaration[]): ActionDeclaration[
+ }
+ 
+ // ---------------------------------------------------------------------------
+-// Input normalisation (accepts a few shapes; tightened in a later change)
++// Input checking. Each registration function accepts one documented shape.
++// JavaScript callers who pass anything else get an INVALID_REGISTRATION
++// diagnostic that shows the right call, instead of items quietly dropped.
++
++const SCREEN_KEYS = new Set(["id", "name", "meta", "template", "cloneEdges"]);
++const EDGE_KEYS = new Set(["from", "to", "id", "cost", "condition", "meta", "actions"]);
++const PATCH_KEYS = new Set(["template", "screens", "edges"]);
++
++const USAGE = {
++  screens: `registerScreens(["product_1", { id: "product_2", name: "Two" }], "item_settings")`,
++  edges: `registerEdges([{ from: "cart", to: "home", actions: [] }])`,
++  patch: `augmentTree({ template: "item_settings", screens: ["product_1"], edges: [] })`,
++};
+ 
+-function normalizeScreenSpecs(input: unknown, defaultTemplate?: string): ScreenSpec[] {
+-  const out: ScreenSpec[] = [];
+-  if (input == null) return out;
+-  const fromObject = (id: string, v: Record<string, unknown>): ScreenSpec => {
+-    const spec: ScreenSpec = { id, template: defaultTemplate };
+-    if (typeof v.name === "string") spec.name = v.name;
+-    if (isPlainObject(v.meta)) spec.meta = v.meta as JsonObject;
+-    const tpl = v.template ?? v.cloneFrom ?? v.from;
+-    if (typeof tpl === "string") spec.template = tpl;
+-    if (typeof v.cloneEdges === "boolean") spec.cloneEdges = v.cloneEdges;
+-    return spec;
+-  };
+-  if (typeof input === "string") return [{ id: input, template: defaultTemplate }];
+-  if (Array.isArray(input)) {
+-    for (const item of input) {
+-      if (typeof item === "string") out.push({ id: item, template: defaultTemplate });
+-      else if (isPlainObject(item) && typeof item.id === "string") out.push(fromObject(item.id, item));
+-    }
+-    return out;
++function unknownKeys(st: Stage, what: string, item: Record<string, unknown>, allowed: ReadonlySet<string>, label: string): boolean {
++  const extra = Object.keys(item).filter((k) => !allowed.has(k));
++  if (extra.length === 0) return false;
++  problem(st, "INVALID_REGISTRATION", `${label} has unknown ${what} ${extra.map((k) => `"${k}"`).join(", ")}. Allowed: ${[...allowed].join(", ")}`, []);
++  return true;
++}
++
++function screenSpecs(st: Stage, input: unknown): ScreenSpec[] {
++  if (!Array.isArray(input)) {
++    problem(st, "INVALID_REGISTRATION", `Screens must be an array of ids or { id } objects. Use ${USAGE.screens}`, []);
++    return [];
+   }
+-  if (isPlainObject(input)) {
+-    const obj = input;
+-    if (Array.isArray(obj.screens)) return normalizeScreenSpecs(obj.screens, typeof obj.template === "string" ? obj.template : defaultTemplate);
+-    if (isPlainObject(obj.screens)) {
+-      const tpl = typeof obj.template === "string" ? obj.template : defaultTemplate;
+-      for (const [id, v] of Object.entries(obj.screens)) {
+-        const spec = fromObject(id, isPlainObject(v) ? v : {});
+-        out.push({ ...spec, template: spec.template ?? tpl });
+-      }
+-      return out;
+-    }
+-    if (typeof obj.id === "string") return [fromObject(obj.id, obj)];
+-    for (const [k, v] of Object.entries(obj)) {
+-      if (k === "screens" || k === "template" || k === "cloneEdges") continue;
+-      out.push(fromObject(k, isPlainObject(v) ? v : {}));
++  const out: ScreenSpec[] = [];
++  input.forEach((item: unknown, i) => {
++    if (typeof item === "string") out.push({ id: item });
++    else if (isPlainObject(item) && typeof item.id === "string") {
++      if (!unknownKeys(st, "option", item, SCREEN_KEYS, `Screen "${item.id}"`)) out.push(item as unknown as ScreenSpec);
++    } else {
++      problem(st, "INVALID_REGISTRATION", `Screen ${i} must be an id string or an object with a string "id". Use ${USAGE.screens}`, []);
+     }
+-  }
++  });
+   return out;
+ }
+ 
+-function normalizeEdgeSpecs(input: unknown): EdgeSpec[] {
+-  if (input == null) return [];
+-  if (Array.isArray(input)) {
+-    return input.filter((item): item is EdgeSpec => isPlainObject(item) && typeof item.from === "string" && typeof item.to === "string");
+-  }
+-  if (isPlainObject(input)) {
+-    if (Array.isArray(input.edges)) return normalizeEdgeSpecs(input.edges);
+-    if (typeof input.from === "string" && typeof input.to === "string") return [input as unknown as EdgeSpec];
++function edgeSpecs(st: Stage, input: unknown): EdgeSpec[] {
++  if (!Array.isArray(input)) {
++    problem(st, "INVALID_REGISTRATION", `Edges must be an array of { from, to } objects. Use ${USAGE.edges}`, []);
++    return [];
+   }
+-  return [];
++  const out: EdgeSpec[] = [];
++  input.forEach((item: unknown, i) => {
++    if (!isPlainObject(item) || typeof item.from !== "string" || typeof item.to !== "string") {
++      problem(st, "INVALID_REGISTRATION", `Edge ${i} must be an object with string "from" and "to". Use ${USAGE.edges}`, []);
++    } else if (!unknownKeys(st, "field", item, EDGE_KEYS, `Edge "${item.from}->${item.to}"`)) {
++      out.push(item as unknown as EdgeSpec);
++    }
++  });
++  return out;
+ }
+ 
+ // ---------------------------------------------------------------------------
+ // Staging
+ 
+ function stageScreens(st: Stage, input: unknown, defaultTemplate: string | undefined, options: RegisterOptions): void {
+-  for (const spec of normalizeScreenSpecs(input, defaultTemplate)) {
+-    const tpl = spec.template ?? spec.cloneFrom ?? spec.from ?? defaultTemplate;
++  for (const spec of screenSpecs(st, input)) {
++    const tpl = spec.template ?? defaultTemplate;
+     const newId = tpl && !spec.id.startsWith(`${tpl}:`) ? `${tpl}:${spec.id}` : spec.id;
+     if (!claimScreen(st, newId, options)) continue;
+ 
+@@ -330,7 +339,7 @@ function stageScreens(st: Stage, input: unknown, defaultTemplate: string | undef
+ }
+ 
+ function stageEdges(st: Stage, input: unknown, options: RegisterOptions): void {
+-  for (const spec of normalizeEdgeSpecs(input)) {
++  for (const spec of edgeSpecs(st, input)) {
+     let condition: Edge["condition"];
+     if (spec.condition) {
+       try {
+@@ -378,23 +387,27 @@ export function createTree(options: { app?: string; schema?: SchemaDefinition |
+  * `<template>:<id>`, a copy of the template screen, and edges touching the
+  * template are copied to the new screen. Returns the same tree.
+  *
+- * `registerScreens(tree, ids, template?, options?)` or, using the shared
+- * default tree, `registerScreens(ids, template?, options?)`.
++ * Accepted input: an array of ids or `{ id, name?, meta?, template?, cloneEdges? }`.
++ * Pass the tree first, or omit it to use the shared default tree.
+  */
++export function registerScreens(tree: NavigationTree, screens: ReadonlyArray<ScreenInput>, template?: string, options?: RegisterOptions): NavigationTree;
++export function registerScreens(tree: NavigationTree, screens: ReadonlyArray<ScreenInput>, options?: RegisterOptions): NavigationTree;
++export function registerScreens(screens: ReadonlyArray<ScreenInput>, template?: string, options?: RegisterOptions): NavigationTree;
++export function registerScreens(screens: ReadonlyArray<ScreenInput>, options?: RegisterOptions): NavigationTree;
+ export function registerScreens(...args: unknown[]): NavigationTree {
+   const { tree, rest } = splitTarget(args);
+-  const [input, third, fourth] = rest;
+-  const template = typeof third === "string" ? third : undefined;
+-  const options = (isPlainObject(third) ? third : isPlainObject(fourth) ? fourth : {}) as RegisterOptions;
+-  const defaultTemplate =
+-    template ?? (isPlainObject(input) && typeof input.template === "string" ? input.template : undefined);
++  const [input, second, third] = rest;
++  const template = typeof second === "string" ? second : undefined;
++  const options = (isPlainObject(second) ? second : isPlainObject(third) ? third : {}) as RegisterOptions;
+   const st = newStage(tree);
+-  stageScreens(st, input, defaultTemplate, options);
++  stageScreens(st, input, template, options);
+   finish(st, options);
+   return tree;
+ }
+ 
+-/** Register edges (transitions) on a tree in place. Returns the same tree. */
++/** Register edges (transitions) on a tree in place. Accepts an array of `{ from, to, ... }`. Returns the same tree. */
++export function registerEdges(tree: NavigationTree, edges: ReadonlyArray<EdgeSpec>, options?: RegisterOptions): NavigationTree;
++export function registerEdges(edges: ReadonlyArray<EdgeSpec>, options?: RegisterOptions): NavigationTree;
+ export function registerEdges(...args: unknown[]): NavigationTree {
+   const { tree, rest } = splitTarget(args);
+   const options = (isPlainObject(rest[1]) ? rest[1] : {}) as RegisterOptions;
+@@ -452,27 +465,37 @@ function stageActions(st: Stage, parent: string, input: unknown, options: Regist
+  * A bare array is shorthand for `{ actions }`. Names are required, so two
+  * actions on one screen never collide. Returns the same tree.
+  */
++export function registerActions(tree: NavigationTree, screenId: string, actions: ActionSpecMap, options?: RegisterOptions): NavigationTree;
++export function registerActions(screenId: string, actions: ActionSpecMap, options?: RegisterOptions): NavigationTree;
+ export function registerActions(...args: unknown[]): NavigationTree {
+   const { tree, rest } = splitTarget(args);
+   const [screenId, input, optionsArg] = rest;
+   const options = (isPlainObject(optionsArg) ? optionsArg : {}) as RegisterOptions;
+   const st = newStage(tree);
+-  stageActions(st, String(screenId), input, options);
++  if (typeof screenId !== "string") problem(st, "INVALID_REGISTRATION", `The first argument must be the id of the parent screen. Use registerActions("cart", { remove_item: { actions: [...] } })`, []);
++  else stageActions(st, screenId, input, options);
+   finish(st, options);
+   return tree;
+ }
+ 
+-/** Apply `{ screens, edges, template }` in one call. Returns the same tree. */
++/** Apply `{ template?, screens?, edges? }` in one call, all or nothing. Returns the same tree. */
++export function augmentTree(tree: NavigationTree, patch: TreePatch, options?: RegisterOptions): NavigationTree;
++export function augmentTree(patch: TreePatch, options?: RegisterOptions): NavigationTree;
+ export function augmentTree(...args: unknown[]): NavigationTree {
+   const { tree, rest } = splitTarget(args);
+-  const patch = rest[0];
+-  if (isPlainObject(patch)) {
+-    const st = newStage(tree);
+-    const options = (isPlainObject(rest[1]) ? rest[1] : {}) as RegisterOptions;
+-    if (patch.screens) stageScreens(st, patch.screens, typeof patch.template === "string" ? patch.template : undefined, options);
+-    if (patch.edges) stageEdges(st, patch.edges, options);
+-    finish(st, options);
++  const [patch, optionsArg] = rest;
++  const options = (isPlainObject(optionsArg) ? optionsArg : {}) as RegisterOptions;
++  const st = newStage(tree);
++  if (!isPlainObject(patch)) {
++    problem(st, "INVALID_REGISTRATION", `The patch must be an object. Use ${USAGE.patch}`, []);
++  } else if (!unknownKeys(st, "field", patch, PATCH_KEYS, "The patch")) {
++    if (patch.template !== undefined && typeof patch.template !== "string") problem(st, "INVALID_REGISTRATION", `"template" must be a screen id`, []);
++    else {
++      if (patch.screens !== undefined) stageScreens(st, patch.screens, patch.template as string | undefined, options);
++      if (patch.edges !== undefined) stageEdges(st, patch.edges, options);
++    }
+   }
++  finish(st, options);
+   return tree;
+ }
+ 
+@@ -481,13 +504,17 @@ export function augmentTree(...args: unknown[]): NavigationTree {
+ 
+ export type ScreenSelector = string | readonly string[] | { template: string };
+ 
+-function selectIds(tree: NavigationTree, selector: unknown): string[] {
++function idList(selector: unknown, usage: string): string[] {
+   if (typeof selector === "string") return [selector];
+-  if (Array.isArray(selector)) return selector.filter((x): x is string => typeof x === "string");
+-  if (isPlainObject(selector) && typeof selector.template === "string") {
++  if (Array.isArray(selector) && selector.every((x) => typeof x === "string")) return [...selector];
++  throw new AppNavError("INVALID_REGISTRATION", `Expected an id or an array of ids. Use ${usage}`);
++}
++
++function selectScreenIds(tree: NavigationTree, selector: unknown): string[] {
++  if (isPlainObject(selector) && typeof selector.template === "string" && Object.keys(selector).length === 1) {
+     return [...tree.screens.values()].filter((s) => s.dynamic && s.template === selector.template).map((s) => s.id);
+   }
+-  return [];
++  return idList(selector, `unregisterScreens("item_settings:product_1") or unregisterScreens({ template: "item_settings" })`);
+ }
+ 
+ /**
+@@ -496,9 +523,11 @@ function selectIds(tree: NavigationTree, selector: unknown): string[] {
+  * are ignored so the call is safe to repeat. Screens that came from the graph
+  * file cannot be removed. Returns the same tree.
+  */
++export function unregisterScreens(tree: NavigationTree, selector: ScreenSelector): NavigationTree;
++export function unregisterScreens(selector: ScreenSelector): NavigationTree;
+ export function unregisterScreens(...args: unknown[]): NavigationTree {
+   const { tree, rest } = splitTarget(args);
+-  const ids = selectIds(tree, rest[0]).filter((id) => tree.hasScreen(id));
++  const ids = selectScreenIds(tree, rest[0]).filter((id) => tree.hasScreen(id));
+   for (const id of ids) {
+     if (!tree.screen(id).dynamic) {
+       throw new AppNavError("NOT_DYNAMIC", `Screen "${id}" came from the graph file and cannot be unregistered`, { ids: [id] });
+@@ -509,9 +538,11 @@ export function unregisterScreens(...args: unknown[]): NavigationTree {
+ }
+ 
+ /** Remove dynamic edges by id. Unknown ids are ignored; file edges cannot be removed. Returns the same tree. */
++export function unregisterEdges(tree: NavigationTree, ids: string | readonly string[]): NavigationTree;
++export function unregisterEdges(ids: string | readonly string[]): NavigationTree;
+ export function unregisterEdges(...args: unknown[]): NavigationTree {
+   const { tree, rest } = splitTarget(args);
+-  const ids = new Set(selectIds(tree, rest[0]));
++  const ids = new Set(idList(rest[0], `unregisterEdges(["home->cart"])`));
+   const blocked = tree.edges.filter((e) => ids.has(e.id) && !e.dynamic);
+   if (blocked.length > 0) {
+     throw new AppNavError("NOT_DYNAMIC", `Edge "${blocked[0]?.id}" came from the graph file and cannot be unregistered`, { ids: blocked.map((e) => e.id) });
+@@ -521,6 +552,7 @@ export function unregisterEdges(...args: unknown[]): NavigationTree {
+ }
+ 
+ /** Remove everything added at runtime, leaving the file graph. Returns the same tree. */
++export function clearDynamic(tree?: NavigationTree): NavigationTree;
+ export function clearDynamic(...args: unknown[]): NavigationTree {
+   const { tree } = splitTarget(args);
+   tree._removeEdges((e) => e.dynamic === true);
+@@ -529,6 +561,7 @@ export function clearDynamic(...args: unknown[]): NavigationTree {
+ }
+ 
+ /** An independent deep copy of a tree (the default tree when omitted). Changes to the copy never touch the original. */
++export function cloneTree(tree?: NavigationTree): NavigationTree;
+ export function cloneTree(...args: unknown[]): NavigationTree {
+   const src = args[0] instanceof NavigationTree ? args[0] : requireDefaultTree();
+   const screens = new Map<string, Screen>();
+@@ -549,78 +582,53 @@ export function cloneTree(...args: unknown[]): NavigationTree {
+ }
+ 
+ // ---------------------------------------------------------------------------
+-// Instance methods
++// Instance methods. Each one calls the free function of the same name, so
++// there is one implementation. They return the tree for chaining.
+ 
+ declare module "./graph" {
+   interface NavigationTree {
+-    registerScreens(input: unknown, template?: string | RegisterOptions, options?: RegisterOptions): NavigationTree;
+-    addScreens(input: unknown, template?: string | RegisterOptions, options?: RegisterOptions): NavigationTree;
+-    registerEdges(input: unknown, options?: RegisterOptions): NavigationTree;
+-    addEdges(input: unknown, options?: RegisterOptions): NavigationTree;
++    registerScreens(screens: ReadonlyArray<ScreenInput>, template?: string, options?: RegisterOptions): NavigationTree;
++    registerScreens(screens: ReadonlyArray<ScreenInput>, options?: RegisterOptions): NavigationTree;
++    registerEdges(edges: ReadonlyArray<EdgeSpec>, options?: RegisterOptions): NavigationTree;
+     registerActions(screenId: string, actions: ActionSpecMap, options?: RegisterOptions): NavigationTree;
+     unregisterScreens(selector: ScreenSelector): NavigationTree;
+     unregisterEdges(ids: string | readonly string[]): NavigationTree;
+     clearDynamic(): NavigationTree;
+-    clone(): NavigationTree;
+     cloneTree(): NavigationTree;
+   }
+ }
+ 
++type Loose = (...args: unknown[]) => NavigationTree;
++const loose = (fn: unknown): Loose => fn as Loose;
+ const proto = NavigationTree.prototype as unknown as Record<string, (this: NavigationTree, ...a: unknown[]) => unknown>;
+-proto.registerScreens = proto.addScreens = function (...a) {
+-  return registerScreens(this, ...a);
++proto.registerScreens = function (...a) {
++  return loose(registerScreens)(this, ...a);
+ };
+-proto.registerEdges = proto.addEdges = function (...a) {
+-  return registerEdges(this, ...a);
++proto.registerEdges = function (...a) {
++  return loose(registerEdges)(this, ...a);
+ };
+ proto.registerActions = function (...a) {
+-  return registerActions(this, ...a);
++  return loose(registerActions)(this, ...a);
+ };
+ proto.unregisterScreens = function (...a) {
+-  return unregisterScreens(this, ...a);
++  return loose(unregisterScreens)(this, ...a);
+ };
+ proto.unregisterEdges = function (...a) {
+-  return unregisterEdges(this, ...a);
++  return loose(unregisterEdges)(this, ...a);
+ };
+ proto.clearDynamic = function () {
+   return clearDynamic(this);
+ };
+-proto.clone = proto.cloneTree = function () {
++proto.cloneTree = function () {
+   return cloneTree(this);
+ };
+ 
+ // ---------------------------------------------------------------------------
+-// Aliases (consolidated in a later change)
+-
+-export type DynamicTree = NavigationTree;
+-export const addScreens = registerScreens;
+-export const registerScreen = registerScreens;
+-export const addScreen = registerScreens;
+-export const addEdges = registerEdges;
+-export const registerEdge = registerEdges;
+-export const addEdge = registerEdges;
+-export const addActions = registerActions;
+-export const registerAction = registerActions;
+-export const copyTree = cloneTree;
+-export const forkTree = cloneTree;
+-export const registerTransition = registerEdges;
+-export const registerTransitions = registerEdges;
+-export const registerTemplate = registerScreens;
+-export const registerTemplates = registerScreens;
+-export const cloneNavigationTree = cloneTree;
++// snake_case names. One per canonical function, nothing else.
+ 
+ export const register_screens = registerScreens;
+-export const register_screen = registerScreens;
+-export const add_screens = registerScreens;
+-export const add_screen = registerScreens;
+ export const register_edges = registerEdges;
+-export const register_edge = registerEdges;
+-export const add_edges = registerEdges;
+-export const add_edge = registerEdges;
+ export const register_actions = registerActions;
+-export const register_action = registerActions;
+-export const add_actions = registerActions;
+-export const add_action = registerActions;
+ export const unregister_screens = unregisterScreens;
+ export const unregister_edges = unregisterEdges;
+ export const clear_dynamic = clearDynamic;
+diff --git a/tests/dynamic.test.ts b/tests/dynamic.test.ts
+index 6c98b69..b89e761 100644
+--- a/tests/dynamic.test.ts
++++ b/tests/dynamic.test.ts
+@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
+ import {
+   NavigationTree,
+   ValidationError,
++  augmentTree,
+   buildInstructionsSync,
+   calculatePath,
+   clearDynamic,
+@@ -11,6 +12,7 @@ import {
+   indexTreeFromText,
+   registerEdges,
+   registerScreens,
++  register_screens,
+   setDefaultTree,
+   unregisterEdges,
+   unregisterScreens,
+@@ -104,7 +106,7 @@ describe("default tree", () => {
+   it("works through the snake_case style and instance methods", () => {
+     const tree = indexTreeFromText(BASE);
+     setDefaultTree(tree);
+-    registerScreens({ screens: { a: { name: "A" } } });
++    register_screens([{ id: "a", name: "A" }]);
+     tree.registerScreens(["p1"], "item_settings");
+     expect(tree.hasScreen("a")).toBe(true);
+     expect(tree.hasScreen("item_settings:p1")).toBe(true);
+@@ -454,3 +456,78 @@ describe("onDuplicate", () => {
+     expect(tree.screen("s").meta).toEqual({ icon: "star" });
+   });
+ });
++
++describe("input shapes", () => {
++  const tree = () => indexTreeFromText(BASE);
++  const codes = (fn: () => unknown) => {
++    try {
++      fn();
++    } catch (e) {
++      return e instanceof ValidationError ? e.diagnostics.map((d) => d.code) : [(e as { code?: string }).code];
++    }
++    return [];
++  };
++
++  it("rejects shapes that used to be quietly accepted, with the right call in the message", () => {
++    const t = tree();
++    for (const bad of [{ screens: { a: {} } }, { a: { name: "A" } }, "a", null, [42], [{ name: "no id" }]]) {
++      expect(codes(() => registerScreens(t, bad as never))).toEqual(["INVALID_REGISTRATION"]);
++    }
++    expect(() => registerScreens(t, "a" as never)).toThrow(/registerScreens\(\[/);
++    expect(codes(() => registerEdges(t, { from: "home", to: "cart" } as never))).toEqual(["INVALID_REGISTRATION"]);
++    expect(codes(() => registerEdges(t, [{ from: "home" }] as never))).toEqual(["INVALID_REGISTRATION"]);
++    expect(t.hasScreen("a")).toBe(false);
++  });
++
++  it("flags unknown keys instead of ignoring them, such as the removed cloneFrom synonym", () => {
++    const t = tree();
++    expect(codes(() => registerScreens(t, [{ id: "x", cloneFrom: "item_settings" }] as never))).toEqual(["INVALID_REGISTRATION"]);
++    expect(codes(() => registerEdges(t, [{ from: "home", to: "cart", weight: 2 }] as never))).toEqual(["INVALID_REGISTRATION"]);
++    expect(codes(() => augmentTree(t, { screens: ["x"], edgez: [] } as never))).toEqual(["INVALID_REGISTRATION"]);
++    expect(t.hasScreen("x")).toBe(false);
++  });
++
++  it("augmentTree applies a patch in one go", () => {
++    const t = tree();
++    augmentTree(t, { template: "item_settings", screens: ["p1"], edges: [{ from: "home", to: "item_settings:p1" }] });
++    expect(calculatePath(t, "home", "item_settings:p1").screens).toEqual(["home", "item_settings:p1"]);
++  });
++
++  it("selectors for removal must be ids, arrays of ids or { template }", () => {
++    const t = tree();
++    registerScreens(t, ["p1", "p2"], "item_settings");
++    expect(() => unregisterScreens(t, 5 as never)).toThrow(/Expected an id/);
++    expect(() => unregisterEdges(t, { template: "item_settings" } as never)).toThrow(/Expected an id/);
++    unregisterScreens(t, ["item_settings:p1"]);
++    expect(t.hasScreen("item_settings:p1")).toBe(false);
++    expect(t.hasScreen("item_settings:p2")).toBe(true);
++  });
++
++  it("exports one canonical name per function, plus its snake_case twin", async () => {
++    const api = (await import("../src")) as Record<string, unknown>;
++    for (const name of ["registerScreens", "registerEdges", "registerActions", "unregisterScreens", "unregisterEdges", "clearDynamic", "cloneTree", "augmentTree"]) {
++      expect(typeof api[name]).toBe("function");
++    }
++    for (const name of ["register_screens", "register_edges", "register_actions", "unregister_screens", "unregister_edges", "clear_dynamic", "clone_tree"]) {
++      expect(typeof api[name]).toBe("function");
++    }
++    for (const gone of [
++      "addScreens", "addScreen", "registerScreen", "addEdges", "addEdge", "registerEdge", "addActions", "registerAction",
++      "copyTree", "forkTree", "registerTransition", "registerTransitions", "registerTemplate", "registerTemplates",
++      "cloneNavigationTree", "register_screen", "register_edge", "register_action", "add_screens", "add_screen",
++      "add_edges", "add_edge", "add_actions", "add_action",
++    ]) {
++      expect(api[gone], gone).toBeUndefined();
++    }
++  });
++
++  it("instance methods share the free functions and return the same tree", () => {
++    const t = tree();
++    expect(t.registerScreens(["p1"], "item_settings").registerEdges([{ from: "home", to: "item_settings:p1" }])).toBe(t);
++    expect(typeof (t as unknown as Record<string, unknown>).addScreens).toBe("undefined");
++    expect(typeof (t as unknown as Record<string, unknown>).clone).toBe("undefined");
++    const copy = t.cloneTree();
++    expect(copy).not.toBe(t);
++    expect(copy.hasScreen("item_settings:p1")).toBe(true);
++  });
++});
+-- 
+2.43.0
+

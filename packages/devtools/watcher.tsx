@@ -1,9 +1,10 @@
 import React from "react";
 
 /**
- * NavGraphWatcher (optional): wrap your app root. In development it records
- * screen transitions into a local extend graph. Persist it however your app
- * prefers (download, send to dev server) and merge with the CLI.
+ * NavGraphWatcher (optional): wrap your app root. In development it logs a
+ * `.navgraph` edge line to the console for every click on an element with a
+ * `data-screen` attribute. It writes nothing to disk. Copy the lines you want
+ * into your graph by hand.
  */
 export function NavGraphWatcher({ children }: { children: React.ReactNode }) {
   React.useEffect(() => {

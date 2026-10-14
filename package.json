@@ -68,7 +68,6 @@
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "vitest run",
     "test:watch": "vitest",
-    "scan": "node tools/scan-app.js",
     "clean": "rm -rf dist coverage",
     "prepublishOnly": "npm run clean && npm run typecheck && npm test && npm run build"
   },

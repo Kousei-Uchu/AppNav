@@ -477,7 +477,28 @@ registerScreens(["product_1", "product_2"], "item_settings");
 registerEdges([{ from: "cart", to: "cart", actions: [{ type: "TAP", data: { target: "Clear" } }] }]);
 ```
 
-Every registration function also accepts a tree as its first argument (`registerScreens(tree, ids, "item_settings")`), and the same calls exist as methods (`tree.registerScreens(ids, "item_settings")`) and in snake case (`register_screens`). Without a tree argument and without a default tree, the call throws an error that says how to set one. All of them return the tree they changed, so calls can be chained.
+Every registration function also accepts a tree as its first argument (`registerScreens(tree, ids, "item_settings")`). There is one canonical name per function, and each exists in three forms:
+
+| Function | Method on the tree | snake_case |
+| --- | --- | --- |
+| `registerScreens` | `tree.registerScreens(...)` | `register_screens` |
+| `registerEdges` | `tree.registerEdges(...)` | `register_edges` |
+| `registerActions` | `tree.registerActions(...)` | `register_actions` |
+| `unregisterScreens` | `tree.unregisterScreens(...)` | `unregister_screens` |
+| `unregisterEdges` | `tree.unregisterEdges(...)` | `unregister_edges` |
+| `clearDynamic` | `tree.clearDynamic()` | `clear_dynamic` |
+| `cloneTree` | `tree.cloneTree()` | `clone_tree` |
+
+`augmentTree(tree?, { template?, screens?, edges? })` applies screens and edges in one all-or-nothing call. There are no other aliases (no `addScreens`, `registerScreen`, `registerTransition`, `registerTemplate`, `copyTree` and so on). Without a tree argument and without a default tree, the call throws an error that says how to set one. All of them return the tree they changed, so calls can be chained.
+
+Each function takes one documented input shape, and the TypeScript types enforce it:
+
+- Screens: an array of ids or `{ id, name?, meta?, template?, cloneEdges? }` objects.
+- Edges: an array of `{ from, to, id?, cost?, condition?, meta?, actions? }` objects.
+- Actions: a screen id and a map from action name to `{ actions, name?, to?, cost?, meta? }` (or a bare array of actions).
+- Removal: an id, an array of ids, or `{ template }` for screens.
+
+Anything else, such as a map of screens, a single edge object, an unknown key, or a misspelt option, fails with an `INVALID_REGISTRATION` diagnostic that shows the right call. Nothing is dropped quietly.
 
 How it behaves:
 
@@ -540,14 +561,9 @@ const out = buildInstructionsSync(calculatePath(tree, "home", "remove_item"));
 // path: home, cart, remove_item. The last step carries the SWIPE.
 ```
 
-## Automatic mapping (optional)
+## Development helpers (optional)
 
-A scanner and a watcher are provided as optional tooling:
-
-- `tools/scan-app.js`: scans source files for `navigation.navigate`, `router.push`, screen components, and action calls, emits a candidate `.navgraph` patch and a unified diff against an existing graph.
-- `NavGraphWatcher` React component (see `examples/watcher.tsx`): wraps the root of an app, records screen/action transitions as you use it, and writes a local `.extend.navgraph` that can be merged through the CLI.
-
-Both are opt-in and do not affect the core package size when unused.
+A source scanner and a click watcher live in `packages/devtools`, a separate private package that is not published with routegraph. See its README. The scanner proposes `SCREEN` lines from `navigation.navigate`, `router.push` and `<Stack.Screen>` calls. The watcher logs edge lines to the console. Neither merges anything for you, and routegraph itself ships no command line tool.
 
 ## Development
 

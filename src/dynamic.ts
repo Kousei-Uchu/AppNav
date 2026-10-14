@@ -35,10 +35,19 @@ export interface ScreenSpec {
   meta?: JsonObject;
   /** Clone an existing screen instead of starting from scratch. */
   template?: string;
-  cloneFrom?: string;
-  from?: string;
   /** Copy edges incident to the template screen. Default true. */
   cloneEdges?: boolean;
+}
+
+/** A screen to register: a bare id, or an object when it needs a name, metadata or its own template. */
+export type ScreenInput = string | ScreenSpec;
+
+/** `{ template?, screens?, edges? }` applied in one call by `augmentTree`. */
+export interface TreePatch {
+  /** Default template for every entry in `screens` that does not name its own. */
+  template?: string;
+  screens?: ReadonlyArray<ScreenInput>;
+  edges?: ReadonlyArray<EdgeSpec>;
 }
 
 export interface EdgeSpec {
@@ -229,66 +238,66 @@ function cloneActions(actions: readonly ActionDeclaration[]): ActionDeclaration[
 }
 
 // ---------------------------------------------------------------------------
-// Input normalisation (accepts a few shapes; tightened in a later change)
+// Input checking. Each registration function accepts one documented shape.
+// JavaScript callers who pass anything else get an INVALID_REGISTRATION
+// diagnostic that shows the right call, instead of items quietly dropped.
 
-function normalizeScreenSpecs(input: unknown, defaultTemplate?: string): ScreenSpec[] {
+const SCREEN_KEYS = new Set(["id", "name", "meta", "template", "cloneEdges"]);
+const EDGE_KEYS = new Set(["from", "to", "id", "cost", "condition", "meta", "actions"]);
+const PATCH_KEYS = new Set(["template", "screens", "edges"]);
+
+const USAGE = {
+  screens: `registerScreens(["product_1", { id: "product_2", name: "Two" }], "item_settings")`,
+  edges: `registerEdges([{ from: "cart", to: "home", actions: [] }])`,
+  patch: `augmentTree({ template: "item_settings", screens: ["product_1"], edges: [] })`,
+};
+
+function unknownKeys(st: Stage, what: string, item: Record<string, unknown>, allowed: ReadonlySet<string>, label: string): boolean {
+  const extra = Object.keys(item).filter((k) => !allowed.has(k));
+  if (extra.length === 0) return false;
+  problem(st, "INVALID_REGISTRATION", `${label} has unknown ${what} ${extra.map((k) => `"${k}"`).join(", ")}. Allowed: ${[...allowed].join(", ")}`, []);
+  return true;
+}
+
+function screenSpecs(st: Stage, input: unknown): ScreenSpec[] {
+  if (!Array.isArray(input)) {
+    problem(st, "INVALID_REGISTRATION", `Screens must be an array of ids or { id } objects. Use ${USAGE.screens}`, []);
+    return [];
+  }
   const out: ScreenSpec[] = [];
-  if (input == null) return out;
-  const fromObject = (id: string, v: Record<string, unknown>): ScreenSpec => {
-    const spec: ScreenSpec = { id, template: defaultTemplate };
-    if (typeof v.name === "string") spec.name = v.name;
-    if (isPlainObject(v.meta)) spec.meta = v.meta as JsonObject;
-    const tpl = v.template ?? v.cloneFrom ?? v.from;
-    if (typeof tpl === "string") spec.template = tpl;
-    if (typeof v.cloneEdges === "boolean") spec.cloneEdges = v.cloneEdges;
-    return spec;
-  };
-  if (typeof input === "string") return [{ id: input, template: defaultTemplate }];
-  if (Array.isArray(input)) {
-    for (const item of input) {
-      if (typeof item === "string") out.push({ id: item, template: defaultTemplate });
-      else if (isPlainObject(item) && typeof item.id === "string") out.push(fromObject(item.id, item));
+  input.forEach((item: unknown, i) => {
+    if (typeof item === "string") out.push({ id: item });
+    else if (isPlainObject(item) && typeof item.id === "string") {
+      if (!unknownKeys(st, "option", item, SCREEN_KEYS, `Screen "${item.id}"`)) out.push(item as unknown as ScreenSpec);
+    } else {
+      problem(st, "INVALID_REGISTRATION", `Screen ${i} must be an id string or an object with a string "id". Use ${USAGE.screens}`, []);
     }
-    return out;
-  }
-  if (isPlainObject(input)) {
-    const obj = input;
-    if (Array.isArray(obj.screens)) return normalizeScreenSpecs(obj.screens, typeof obj.template === "string" ? obj.template : defaultTemplate);
-    if (isPlainObject(obj.screens)) {
-      const tpl = typeof obj.template === "string" ? obj.template : defaultTemplate;
-      for (const [id, v] of Object.entries(obj.screens)) {
-        const spec = fromObject(id, isPlainObject(v) ? v : {});
-        out.push({ ...spec, template: spec.template ?? tpl });
-      }
-      return out;
-    }
-    if (typeof obj.id === "string") return [fromObject(obj.id, obj)];
-    for (const [k, v] of Object.entries(obj)) {
-      if (k === "screens" || k === "template" || k === "cloneEdges") continue;
-      out.push(fromObject(k, isPlainObject(v) ? v : {}));
-    }
-  }
+  });
   return out;
 }
 
-function normalizeEdgeSpecs(input: unknown): EdgeSpec[] {
-  if (input == null) return [];
-  if (Array.isArray(input)) {
-    return input.filter((item): item is EdgeSpec => isPlainObject(item) && typeof item.from === "string" && typeof item.to === "string");
+function edgeSpecs(st: Stage, input: unknown): EdgeSpec[] {
+  if (!Array.isArray(input)) {
+    problem(st, "INVALID_REGISTRATION", `Edges must be an array of { from, to } objects. Use ${USAGE.edges}`, []);
+    return [];
   }
-  if (isPlainObject(input)) {
-    if (Array.isArray(input.edges)) return normalizeEdgeSpecs(input.edges);
-    if (typeof input.from === "string" && typeof input.to === "string") return [input as unknown as EdgeSpec];
-  }
-  return [];
+  const out: EdgeSpec[] = [];
+  input.forEach((item: unknown, i) => {
+    if (!isPlainObject(item) || typeof item.from !== "string" || typeof item.to !== "string") {
+      problem(st, "INVALID_REGISTRATION", `Edge ${i} must be an object with string "from" and "to". Use ${USAGE.edges}`, []);
+    } else if (!unknownKeys(st, "field", item, EDGE_KEYS, `Edge "${item.from}->${item.to}"`)) {
+      out.push(item as unknown as EdgeSpec);
+    }
+  });
+  return out;
 }
 
 // ---------------------------------------------------------------------------
 // Staging
 
 function stageScreens(st: Stage, input: unknown, defaultTemplate: string | undefined, options: RegisterOptions): void {
-  for (const spec of normalizeScreenSpecs(input, defaultTemplate)) {
-    const tpl = spec.template ?? spec.cloneFrom ?? spec.from ?? defaultTemplate;
+  for (const spec of screenSpecs(st, input)) {
+    const tpl = spec.template ?? defaultTemplate;
     const newId = tpl && !spec.id.startsWith(`${tpl}:`) ? `${tpl}:${spec.id}` : spec.id;
     if (!claimScreen(st, newId, options)) continue;
 
@@ -330,7 +339,7 @@ function stageScreens(st: Stage, input: unknown, defaultTemplate: string | undef
 }
 
 function stageEdges(st: Stage, input: unknown, options: RegisterOptions): void {
-  for (const spec of normalizeEdgeSpecs(input)) {
+  for (const spec of edgeSpecs(st, input)) {
     let condition: Edge["condition"];
     if (spec.condition) {
       try {
@@ -378,23 +387,27 @@ export function createTree(options: { app?: string; schema?: SchemaDefinition | 
  * `<template>:<id>`, a copy of the template screen, and edges touching the
  * template are copied to the new screen. Returns the same tree.
  *
- * `registerScreens(tree, ids, template?, options?)` or, using the shared
- * default tree, `registerScreens(ids, template?, options?)`.
+ * Accepted input: an array of ids or `{ id, name?, meta?, template?, cloneEdges? }`.
+ * Pass the tree first, or omit it to use the shared default tree.
  */
+export function registerScreens(tree: NavigationTree, screens: ReadonlyArray<ScreenInput>, template?: string, options?: RegisterOptions): NavigationTree;
+export function registerScreens(tree: NavigationTree, screens: ReadonlyArray<ScreenInput>, options?: RegisterOptions): NavigationTree;
+export function registerScreens(screens: ReadonlyArray<ScreenInput>, template?: string, options?: RegisterOptions): NavigationTree;
+export function registerScreens(screens: ReadonlyArray<ScreenInput>, options?: RegisterOptions): NavigationTree;
 export function registerScreens(...args: unknown[]): NavigationTree {
   const { tree, rest } = splitTarget(args);
-  const [input, third, fourth] = rest;
-  const template = typeof third === "string" ? third : undefined;
-  const options = (isPlainObject(third) ? third : isPlainObject(fourth) ? fourth : {}) as RegisterOptions;
-  const defaultTemplate =
-    template ?? (isPlainObject(input) && typeof input.template === "string" ? input.template : undefined);
+  const [input, second, third] = rest;
+  const template = typeof second === "string" ? second : undefined;
+  const options = (isPlainObject(second) ? second : isPlainObject(third) ? third : {}) as RegisterOptions;
   const st = newStage(tree);
-  stageScreens(st, input, defaultTemplate, options);
+  stageScreens(st, input, template, options);
   finish(st, options);
   return tree;
 }
 
-/** Register edges (transitions) on a tree in place. Returns the same tree. */
+/** Register edges (transitions) on a tree in place. Accepts an array of `{ from, to, ... }`. Returns the same tree. */
+export function registerEdges(tree: NavigationTree, edges: ReadonlyArray<EdgeSpec>, options?: RegisterOptions): NavigationTree;
+export function registerEdges(edges: ReadonlyArray<EdgeSpec>, options?: RegisterOptions): NavigationTree;
 export function registerEdges(...args: unknown[]): NavigationTree {
   const { tree, rest } = splitTarget(args);
   const options = (isPlainObject(rest[1]) ? rest[1] : {}) as RegisterOptions;
@@ -452,27 +465,37 @@ function stageActions(st: Stage, parent: string, input: unknown, options: Regist
  * A bare array is shorthand for `{ actions }`. Names are required, so two
  * actions on one screen never collide. Returns the same tree.
  */
+export function registerActions(tree: NavigationTree, screenId: string, actions: ActionSpecMap, options?: RegisterOptions): NavigationTree;
+export function registerActions(screenId: string, actions: ActionSpecMap, options?: RegisterOptions): NavigationTree;
 export function registerActions(...args: unknown[]): NavigationTree {
   const { tree, rest } = splitTarget(args);
   const [screenId, input, optionsArg] = rest;
   const options = (isPlainObject(optionsArg) ? optionsArg : {}) as RegisterOptions;
   const st = newStage(tree);
-  stageActions(st, String(screenId), input, options);
+  if (typeof screenId !== "string") problem(st, "INVALID_REGISTRATION", `The first argument must be the id of the parent screen. Use registerActions("cart", { remove_item: { actions: [...] } })`, []);
+  else stageActions(st, screenId, input, options);
   finish(st, options);
   return tree;
 }
 
-/** Apply `{ screens, edges, template }` in one call. Returns the same tree. */
+/** Apply `{ template?, screens?, edges? }` in one call, all or nothing. Returns the same tree. */
+export function augmentTree(tree: NavigationTree, patch: TreePatch, options?: RegisterOptions): NavigationTree;
+export function augmentTree(patch: TreePatch, options?: RegisterOptions): NavigationTree;
 export function augmentTree(...args: unknown[]): NavigationTree {
   const { tree, rest } = splitTarget(args);
-  const patch = rest[0];
-  if (isPlainObject(patch)) {
-    const st = newStage(tree);
-    const options = (isPlainObject(rest[1]) ? rest[1] : {}) as RegisterOptions;
-    if (patch.screens) stageScreens(st, patch.screens, typeof patch.template === "string" ? patch.template : undefined, options);
-    if (patch.edges) stageEdges(st, patch.edges, options);
-    finish(st, options);
+  const [patch, optionsArg] = rest;
+  const options = (isPlainObject(optionsArg) ? optionsArg : {}) as RegisterOptions;
+  const st = newStage(tree);
+  if (!isPlainObject(patch)) {
+    problem(st, "INVALID_REGISTRATION", `The patch must be an object. Use ${USAGE.patch}`, []);
+  } else if (!unknownKeys(st, "field", patch, PATCH_KEYS, "The patch")) {
+    if (patch.template !== undefined && typeof patch.template !== "string") problem(st, "INVALID_REGISTRATION", `"template" must be a screen id`, []);
+    else {
+      if (patch.screens !== undefined) stageScreens(st, patch.screens, patch.template as string | undefined, options);
+      if (patch.edges !== undefined) stageEdges(st, patch.edges, options);
+    }
   }
+  finish(st, options);
   return tree;
 }
 
@@ -481,13 +504,17 @@ export function augmentTree(...args: unknown[]): NavigationTree {
 
 export type ScreenSelector = string | readonly string[] | { template: string };
 
-function selectIds(tree: NavigationTree, selector: unknown): string[] {
+function idList(selector: unknown, usage: string): string[] {
   if (typeof selector === "string") return [selector];
-  if (Array.isArray(selector)) return selector.filter((x): x is string => typeof x === "string");
-  if (isPlainObject(selector) && typeof selector.template === "string") {
+  if (Array.isArray(selector) && selector.every((x) => typeof x === "string")) return [...selector];
+  throw new AppNavError("INVALID_REGISTRATION", `Expected an id or an array of ids. Use ${usage}`);
+}
+
+function selectScreenIds(tree: NavigationTree, selector: unknown): string[] {
+  if (isPlainObject(selector) && typeof selector.template === "string" && Object.keys(selector).length === 1) {
     return [...tree.screens.values()].filter((s) => s.dynamic && s.template === selector.template).map((s) => s.id);
   }
-  return [];
+  return idList(selector, `unregisterScreens("item_settings:product_1") or unregisterScreens({ template: "item_settings" })`);
 }
 
 /**
@@ -496,9 +523,11 @@ function selectIds(tree: NavigationTree, selector: unknown): string[] {
  * are ignored so the call is safe to repeat. Screens that came from the graph
  * file cannot be removed. Returns the same tree.
  */
+export function unregisterScreens(tree: NavigationTree, selector: ScreenSelector): NavigationTree;
+export function unregisterScreens(selector: ScreenSelector): NavigationTree;
 export function unregisterScreens(...args: unknown[]): NavigationTree {
   const { tree, rest } = splitTarget(args);
-  const ids = selectIds(tree, rest[0]).filter((id) => tree.hasScreen(id));
+  const ids = selectScreenIds(tree, rest[0]).filter((id) => tree.hasScreen(id));
   for (const id of ids) {
     if (!tree.screen(id).dynamic) {
       throw new AppNavError("NOT_DYNAMIC", `Screen "${id}" came from the graph file and cannot be unregistered`, { ids: [id] });
@@ -509,9 +538,11 @@ export function unregisterScreens(...args: unknown[]): NavigationTree {
 }
 
 /** Remove dynamic edges by id. Unknown ids are ignored; file edges cannot be removed. Returns the same tree. */
+export function unregisterEdges(tree: NavigationTree, ids: string | readonly string[]): NavigationTree;
+export function unregisterEdges(ids: string | readonly string[]): NavigationTree;
 export function unregisterEdges(...args: unknown[]): NavigationTree {
   const { tree, rest } = splitTarget(args);
-  const ids = new Set(selectIds(tree, rest[0]));
+  const ids = new Set(idList(rest[0], `unregisterEdges(["home->cart"])`));
   const blocked = tree.edges.filter((e) => ids.has(e.id) && !e.dynamic);
   if (blocked.length > 0) {
     throw new AppNavError("NOT_DYNAMIC", `Edge "${blocked[0]?.id}" came from the graph file and cannot be unregistered`, { ids: blocked.map((e) => e.id) });
@@ -521,6 +552,7 @@ export function unregisterEdges(...args: unknown[]): NavigationTree {
 }
 
 /** Remove everything added at runtime, leaving the file graph. Returns the same tree. */
+export function clearDynamic(tree?: NavigationTree): NavigationTree;
 export function clearDynamic(...args: unknown[]): NavigationTree {
   const { tree } = splitTarget(args);
   tree._removeEdges((e) => e.dynamic === true);
@@ -529,6 +561,7 @@ export function clearDynamic(...args: unknown[]): NavigationTree {
 }
 
 /** An independent deep copy of a tree (the default tree when omitted). Changes to the copy never touch the original. */
+export function cloneTree(tree?: NavigationTree): NavigationTree;
 export function cloneTree(...args: unknown[]): NavigationTree {
   const src = args[0] instanceof NavigationTree ? args[0] : requireDefaultTree();
   const screens = new Map<string, Screen>();
@@ -549,78 +582,53 @@ export function cloneTree(...args: unknown[]): NavigationTree {
 }
 
 // ---------------------------------------------------------------------------
-// Instance methods
+// Instance methods. Each one calls the free function of the same name, so
+// there is one implementation. They return the tree for chaining.
 
 declare module "./graph" {
   interface NavigationTree {
-    registerScreens(input: unknown, template?: string | RegisterOptions, options?: RegisterOptions): NavigationTree;
-    addScreens(input: unknown, template?: string | RegisterOptions, options?: RegisterOptions): NavigationTree;
-    registerEdges(input: unknown, options?: RegisterOptions): NavigationTree;
-    addEdges(input: unknown, options?: RegisterOptions): NavigationTree;
+    registerScreens(screens: ReadonlyArray<ScreenInput>, template?: string, options?: RegisterOptions): NavigationTree;
+    registerScreens(screens: ReadonlyArray<ScreenInput>, options?: RegisterOptions): NavigationTree;
+    registerEdges(edges: ReadonlyArray<EdgeSpec>, options?: RegisterOptions): NavigationTree;
     registerActions(screenId: string, actions: ActionSpecMap, options?: RegisterOptions): NavigationTree;
     unregisterScreens(selector: ScreenSelector): NavigationTree;
     unregisterEdges(ids: string | readonly string[]): NavigationTree;
     clearDynamic(): NavigationTree;
-    clone(): NavigationTree;
     cloneTree(): NavigationTree;
   }
 }
 
+type Loose = (...args: unknown[]) => NavigationTree;
+const loose = (fn: unknown): Loose => fn as Loose;
 const proto = NavigationTree.prototype as unknown as Record<string, (this: NavigationTree, ...a: unknown[]) => unknown>;
-proto.registerScreens = proto.addScreens = function (...a) {
-  return registerScreens(this, ...a);
+proto.registerScreens = function (...a) {
+  return loose(registerScreens)(this, ...a);
 };
-proto.registerEdges = proto.addEdges = function (...a) {
-  return registerEdges(this, ...a);
+proto.registerEdges = function (...a) {
+  return loose(registerEdges)(this, ...a);
 };
 proto.registerActions = function (...a) {
-  return registerActions(this, ...a);
+  return loose(registerActions)(this, ...a);
 };
 proto.unregisterScreens = function (...a) {
-  return unregisterScreens(this, ...a);
+  return loose(unregisterScreens)(this, ...a);
 };
 proto.unregisterEdges = function (...a) {
-  return unregisterEdges(this, ...a);
+  return loose(unregisterEdges)(this, ...a);
 };
 proto.clearDynamic = function () {
   return clearDynamic(this);
 };
-proto.clone = proto.cloneTree = function () {
+proto.cloneTree = function () {
   return cloneTree(this);
 };
 
 // ---------------------------------------------------------------------------
-// Aliases (consolidated in a later change)
-
-export type DynamicTree = NavigationTree;
-export const addScreens = registerScreens;
-export const registerScreen = registerScreens;
-export const addScreen = registerScreens;
-export const addEdges = registerEdges;
-export const registerEdge = registerEdges;
-export const addEdge = registerEdges;
-export const addActions = registerActions;
-export const registerAction = registerActions;
-export const copyTree = cloneTree;
-export const forkTree = cloneTree;
-export const registerTransition = registerEdges;
-export const registerTransitions = registerEdges;
-export const registerTemplate = registerScreens;
-export const registerTemplates = registerScreens;
-export const cloneNavigationTree = cloneTree;
+// snake_case names. One per canonical function, nothing else.
 
 export const register_screens = registerScreens;
-export const register_screen = registerScreens;
-export const add_screens = registerScreens;
-export const add_screen = registerScreens;
 export const register_edges = registerEdges;
-export const register_edge = registerEdges;
-export const add_edges = registerEdges;
-export const add_edge = registerEdges;
 export const register_actions = registerActions;
-export const register_action = registerActions;
-export const add_actions = registerActions;
-export const add_action = registerActions;
 export const unregister_screens = unregisterScreens;
 export const unregister_edges = unregisterEdges;
 export const clear_dynamic = clearDynamic;

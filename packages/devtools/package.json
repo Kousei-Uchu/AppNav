@@ -1,0 +1,10 @@
+{
+  "name": "routegraph-devtools",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Optional development helpers for routegraph. Not part of the core package.",
+  "license": "MIT",
+  "bin": {
+    "routegraph-scan": "./scan-app.js"
+  }
+}

@@ -1,14 +1,13 @@
 #!/usr/bin/env node
 /**
  * Scans application source and proposes navigation edges/screens.
- * Usage: node tools/scan-app.js <source-dir> [--graph app.navgraph] [--out proposed.extend.navgraph]
+ * Usage: node scan-app.js <source-dir> [--out proposed.extend.navgraph]
  */
 const fs = require("node:fs");
 const path = require("node:path");
 
 const args = process.argv.slice(2);
 const srcDir = args.find((a) => !a.startsWith("--")) || "src";
-const graphArg = argValue("--graph", "app.navgraph");
 const outArg = argValue("--out", "proposed.extend.navgraph");
 
 function argValue(name, fallback) {
@@ -76,6 +75,3 @@ console.log(`Wrote ${outArg}`);
 function sanitize(s) {
   return String(s).replace(/[^A-Za-z0-9_.:-]/g, "_");
 }
-EOF
-chmod +x tools/scan-app.js
-node tools/scan-app.js . 2>&1 | tail -5

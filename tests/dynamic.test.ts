@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   NavigationTree,
   ValidationError,
+  augmentTree,
   buildInstructionsSync,
   calculatePath,
   clearDynamic,
@@ -11,6 +12,7 @@ import {
   indexTreeFromText,
   registerEdges,
   registerScreens,
+  register_screens,
   setDefaultTree,
   unregisterEdges,
   unregisterScreens,
@@ -104,7 +106,7 @@ describe("default tree", () => {
   it("works through the snake_case style and instance methods", () => {
     const tree = indexTreeFromText(BASE);
     setDefaultTree(tree);
-    registerScreens({ screens: { a: { name: "A" } } });
+    register_screens([{ id: "a", name: "A" }]);
     tree.registerScreens(["p1"], "item_settings");
     expect(tree.hasScreen("a")).toBe(true);
     expect(tree.hasScreen("item_settings:p1")).toBe(true);
@@ -452,5 +454,80 @@ describe("onDuplicate", () => {
     registerScreens(tree, [{ id: "s", meta: { icon: "star" } }]);
     registerScreens(tree, [{ id: "s", meta: { icon: 5 } }], { onDuplicate: "replace", diagnostics: "collect" });
     expect(tree.screen("s").meta).toEqual({ icon: "star" });
+  });
+});
+
+describe("input shapes", () => {
+  const tree = () => indexTreeFromText(BASE);
+  const codes = (fn: () => unknown) => {
+    try {
+      fn();
+    } catch (e) {
+      return e instanceof ValidationError ? e.diagnostics.map((d) => d.code) : [(e as { code?: string }).code];
+    }
+    return [];
+  };
+
+  it("rejects shapes that used to be quietly accepted, with the right call in the message", () => {
+    const t = tree();
+    for (const bad of [{ screens: { a: {} } }, { a: { name: "A" } }, "a", null, [42], [{ name: "no id" }]]) {
+      expect(codes(() => registerScreens(t, bad as never))).toEqual(["INVALID_REGISTRATION"]);
+    }
+    expect(() => registerScreens(t, "a" as never)).toThrow(/registerScreens\(\[/);
+    expect(codes(() => registerEdges(t, { from: "home", to: "cart" } as never))).toEqual(["INVALID_REGISTRATION"]);
+    expect(codes(() => registerEdges(t, [{ from: "home" }] as never))).toEqual(["INVALID_REGISTRATION"]);
+    expect(t.hasScreen("a")).toBe(false);
+  });
+
+  it("flags unknown keys instead of ignoring them, such as the removed cloneFrom synonym", () => {
+    const t = tree();
+    expect(codes(() => registerScreens(t, [{ id: "x", cloneFrom: "item_settings" }] as never))).toEqual(["INVALID_REGISTRATION"]);
+    expect(codes(() => registerEdges(t, [{ from: "home", to: "cart", weight: 2 }] as never))).toEqual(["INVALID_REGISTRATION"]);
+    expect(codes(() => augmentTree(t, { screens: ["x"], edgez: [] } as never))).toEqual(["INVALID_REGISTRATION"]);
+    expect(t.hasScreen("x")).toBe(false);
+  });
+
+  it("augmentTree applies a patch in one go", () => {
+    const t = tree();
+    augmentTree(t, { template: "item_settings", screens: ["p1"], edges: [{ from: "home", to: "item_settings:p1" }] });
+    expect(calculatePath(t, "home", "item_settings:p1").screens).toEqual(["home", "item_settings:p1"]);
+  });
+
+  it("selectors for removal must be ids, arrays of ids or { template }", () => {
+    const t = tree();
+    registerScreens(t, ["p1", "p2"], "item_settings");
+    expect(() => unregisterScreens(t, 5 as never)).toThrow(/Expected an id/);
+    expect(() => unregisterEdges(t, { template: "item_settings" } as never)).toThrow(/Expected an id/);
+    unregisterScreens(t, ["item_settings:p1"]);
+    expect(t.hasScreen("item_settings:p1")).toBe(false);
+    expect(t.hasScreen("item_settings:p2")).toBe(true);
+  });
+
+  it("exports one canonical name per function, plus its snake_case twin", async () => {
+    const api = (await import("../src")) as Record<string, unknown>;
+    for (const name of ["registerScreens", "registerEdges", "registerActions", "unregisterScreens", "unregisterEdges", "clearDynamic", "cloneTree", "augmentTree"]) {
+      expect(typeof api[name]).toBe("function");
+    }
+    for (const name of ["register_screens", "register_edges", "register_actions", "unregister_screens", "unregister_edges", "clear_dynamic", "clone_tree"]) {
+      expect(typeof api[name]).toBe("function");
+    }
+    for (const gone of [
+      "addScreens", "addScreen", "registerScreen", "addEdges", "addEdge", "registerEdge", "addActions", "registerAction",
+      "copyTree", "forkTree", "registerTransition", "registerTransitions", "registerTemplate", "registerTemplates",
+      "cloneNavigationTree", "register_screen", "register_edge", "register_action", "add_screens", "add_screen",
+      "add_edges", "add_edge", "add_actions", "add_action",
+    ]) {
+      expect(api[gone], gone).toBeUndefined();
+    }
+  });
+
+  it("instance methods share the free functions and return the same tree", () => {
+    const t = tree();
+    expect(t.registerScreens(["p1"], "item_settings").registerEdges([{ from: "home", to: "item_settings:p1" }])).toBe(t);
+    expect(typeof (t as unknown as Record<string, unknown>).addScreens).toBe("undefined");
+    expect(typeof (t as unknown as Record<string, unknown>).clone).toBe("undefined");
+    const copy = t.cloneTree();
+    expect(copy).not.toBe(t);
+    expect(copy.hasScreen("item_settings:p1")).toBe(true);
   });
 });

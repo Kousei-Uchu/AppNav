@@ -19,6 +19,8 @@ Checklist when generating or editing a `.navgraph`:
 Checklist when writing code against the API (dynamic graphs):
 - Dynamic registration (`registerScreens`, `registerEdges`, `registerActions`) changes the tree in place and returns the same tree. Use `cloneTree` for an independent copy.
 - Without a tree argument, registration uses the shared tree set by `setDefaultTree` or `setAsDefault: true`.
+- Use the canonical names only: `registerScreens`, `registerEdges`, `registerActions`, `unregisterScreens`, `unregisterEdges`, `clearDynamic`, `cloneTree`, `augmentTree`, or their snake_case twins. Do not invent or use aliases such as `addScreens` or `registerScreen`; they do not exist.
+- Inputs are arrays: `registerScreens(["p1"], "tpl")`, `registerEdges([{ from, to }])`. A map of screens or a single edge object is rejected with `INVALID_REGISTRATION`.
 - Added items are flagged `dynamic`. Remove them with `unregisterScreens`, `unregisterEdges` or `clearDynamic`. File items cannot be removed.
 - Registered screens, edges and actions are validated like a parsed graph. Action types must exist in the tree's schema. Failures throw `ValidationError`; `{ diagnostics: "collect" }` keeps the valid items instead.
 - `registerActions(screen, { name: { actions: [...] } })` needs a name per action. Duplicate ids error unless `onDuplicate` is `"skip"` or `"replace"`.
