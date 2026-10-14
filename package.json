@@ -1,6 +1,6 @@
 {
   "name": "routegraph",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Typed navigation graphs for apps: a compact .navgraph format, pathfinding, and JSON instruction generation with extension hooks. Works in React Native, browsers and Node.",
   "keywords": [
     "navigation",
@@ -15,7 +15,7 @@
     "dsl"
   ],
   "license": "MIT",
-  "author": "Sorren",
+  "author": "Aspen",
   "sideEffects": false,
   "type": "commonjs",
   "peerDependencies": {
