@@ -19,6 +19,7 @@ Checklist when writing code against the API (dynamic graphs):
 - Dynamic registration (`registerScreens`, `registerEdges`, `registerActions`) changes the tree in place and returns the same tree. Use `cloneTree` for an independent copy.
 - Without a tree argument, registration uses the shared tree set by `setDefaultTree` or `setAsDefault: true`.
 - Added items are flagged `dynamic`. Remove them with `unregisterScreens`, `unregisterEdges` or `clearDynamic`. File items cannot be removed.
+- Registered screens, edges and actions are validated like a parsed graph. Action types must exist in the tree's schema. Failures throw `ValidationError`; `{ diagnostics: "collect" }` keeps the valid items instead.
 - Template copies clone incident edges when `cloneEdges` is true. A registration call is all or nothing.
 
 Checklist when writing code against the API:

@@ -1,17 +1,25 @@
 import { parseCondition } from "./conditions";
 import { requireDefaultTree } from "./default-tree";
-import { AppNavError, UnknownScreenError } from "./errors";
-import { NavigationTree, indexGraph } from "./graph";
+import { AppNavError, ValidationError } from "./errors";
+import {
+  NavigationTree,
+  indexGraph,
+  validateEdgeRecord,
+  validateScreenRecord,
+  type RecordValidationEnv,
+  type ValidateOptions,
+} from "./graph";
 import { cloneJson, deepFreeze, isPlainObject } from "./json";
 import type { ResolvedSchema, SchemaDefinition } from "./schema";
-import type { ActionDeclaration, Edge, JsonObject, Screen, VariableDeclaration } from "./types";
+import type { ActionDeclaration, Diagnostic, Edge, JsonObject, Screen, VariableDeclaration } from "./types";
 
 /**
  * Runtime registration. Screens, edges and actions are added to a live tree in
  * place and flagged `dynamic`. Every function takes the tree as its first
  * argument, or omits it to use the shared default tree (`setDefaultTree`).
- * Registration is staged first and committed only when the whole call
- * succeeds, so a failed call leaves the tree untouched.
+ * Registration is staged, validated with the same checks a parsed graph gets
+ * (action types, payloads, variables, conditions, endpoints), and committed
+ * only when the whole call succeeds, so a failed call leaves the tree untouched.
  */
 
 export interface ScreenSpec {
@@ -36,9 +44,15 @@ export interface EdgeSpec {
   actions?: ReadonlyArray<{ type: string; data?: JsonObject }>;
 }
 
-export interface RegisterOptions {
+export interface RegisterOptions extends ValidateOptions {
   /** Copy edges incident to the template screen. Default true. */
   cloneEdges?: boolean;
+  /**
+   * What to do when something fails validation. "throw" (default) raises a
+   * ValidationError and registers nothing. "collect" registers the valid items,
+   * skips the rest, and records the problems in `tree.diagnostics`.
+   */
+  diagnostics?: "throw" | "collect";
 }
 
 // ---------------------------------------------------------------------------
@@ -54,6 +68,8 @@ interface Stage {
   readonly screens: Map<string, Screen>;
   readonly edges: Edge[];
   readonly usedEdgeIds: Set<string>;
+  /** Problems found while staging, before validation runs. */
+  readonly diagnostics: Diagnostic[];
   nextScreen: number;
   nextEdge: number;
 }
@@ -64,6 +80,7 @@ function newStage(tree: NavigationTree): Stage {
     screens: new Map(),
     edges: [],
     usedEdgeIds: new Set(tree.edges.map((e) => e.id)),
+    diagnostics: [],
     nextScreen: tree._nextScreenIndex(),
     nextEdge: tree._nextEdgeIndex(),
   };
@@ -72,10 +89,16 @@ function newStage(tree: NavigationTree): Stage {
 const hasScreen = (st: Stage, id: string) => st.screens.has(id) || st.tree.hasScreen(id);
 const getScreen = (st: Stage, id: string) => st.screens.get(id) ?? st.tree.screens.get(id);
 
-/** Deterministic edge id: `from->to`, then `from->to#2`, `#3`, and so on. */
-function uniqueEdgeId(st: Stage, from: string, to: string, explicit?: string): string {
+const problem = (st: Stage, code: string, message: string, ids: string[]) =>
+  st.diagnostics.push({ severity: "error", code, message, file: st.tree.file, ids });
+
+/** Deterministic edge id: `from->to`, then `from->to#2`, `#3`, and so on. Undefined for a duplicate explicit id. */
+function uniqueEdgeId(st: Stage, from: string, to: string, explicit?: string): string | undefined {
   if (explicit !== undefined) {
-    if (st.usedEdgeIds.has(explicit)) throw new AppNavError("DUPLICATE_EDGE", `Duplicate edge id "${explicit}"`, { ids: [explicit] });
+    if (st.usedEdgeIds.has(explicit)) {
+      problem(st, "DUPLICATE_EDGE", `Duplicate edge id "${explicit}"`, [explicit]);
+      return undefined;
+    }
     st.usedEdgeIds.add(explicit);
     return explicit;
   }
@@ -86,9 +109,38 @@ function uniqueEdgeId(st: Stage, from: string, to: string, explicit?: string): s
   return id;
 }
 
-function commit(st: Stage): void {
-  for (const screen of st.screens.values()) st.tree._addScreen(deepFreeze(screen));
-  for (const edge of st.edges) st.tree._addEdge(deepFreeze(edge));
+/**
+ * Validate everything staged with the same checks a parsed graph gets, then
+ * commit. In "throw" mode any problem aborts the whole call. In "collect" mode
+ * valid items are committed and the problems are recorded on the tree.
+ */
+function finish(st: Stage, options: RegisterOptions): void {
+  const tree = st.tree;
+  const bad = new Set<string>();
+  const env: RecordValidationEnv = {
+    schema: tree.schema,
+    declarations: tree.variables,
+    hasScreen: (id) => !bad.has(id) && hasScreen(st, id),
+    options,
+    file: tree.file,
+  };
+  const found: Diagnostic[] = [...st.diagnostics];
+  for (const screen of st.screens.values()) {
+    const d = validateScreenRecord(screen, env);
+    if (d.length > 0) bad.add(screen.id);
+    found.push(...d);
+  }
+  const edges: Edge[] = [];
+  for (const edge of st.edges) {
+    const d = validateEdgeRecord(edge, env);
+    found.push(...d);
+    if (d.length === 0) edges.push(edge);
+  }
+  const hasErrors = found.some((d) => d.severity === "error");
+  if (hasErrors && options.diagnostics !== "collect") throw new ValidationError(found, tree.file);
+  if (found.length > 0) tree._addDiagnostics(found);
+  for (const screen of st.screens.values()) if (!bad.has(screen.id)) tree._addScreen(deepFreeze(screen));
+  for (const edge of edges) tree._addEdge(deepFreeze(edge));
 }
 
 function cloneActions(actions: readonly ActionDeclaration[]): ActionDeclaration[] {
@@ -160,7 +212,10 @@ function stageScreens(st: Stage, input: unknown, defaultTemplate: string | undef
     if (hasScreen(st, newId)) continue;
 
     const base = tpl ? getScreen(st, tpl) : undefined;
-    if (tpl && !base) throw new UnknownScreenError(tpl);
+    if (tpl && !base) {
+      problem(st, "UNKNOWN_SCREEN", `Unknown template screen "${tpl}"`, [tpl]);
+      continue;
+    }
 
     const screen: Screen = {
       id: newId,
@@ -178,7 +233,7 @@ function stageScreens(st: Stage, input: unknown, defaultTemplate: string | undef
         const from = e.from === tpl ? newId : e.from;
         const to = e.to === tpl ? newId : e.to;
         st.edges.push({
-          id: uniqueEdgeId(st, from, to),
+          id: uniqueEdgeId(st, from, to) as string,
           from,
           to,
           cost: e.cost,
@@ -195,13 +250,23 @@ function stageScreens(st: Stage, input: unknown, defaultTemplate: string | undef
 
 function stageEdges(st: Stage, input: unknown): void {
   for (const spec of normalizeEdgeSpecs(input)) {
-    for (const end of [spec.from, spec.to]) if (!hasScreen(st, end)) throw new UnknownScreenError(end);
+    let condition: Edge["condition"];
+    if (spec.condition) {
+      try {
+        condition = parseCondition(spec.condition);
+      } catch (e) {
+        problem(st, "INVALID_CONDITION", e instanceof Error ? e.message : String(e), [`${spec.from}->${spec.to}`]);
+        continue;
+      }
+    }
+    const id = uniqueEdgeId(st, spec.from, spec.to, spec.id);
+    if (id === undefined) continue;
     st.edges.push({
-      id: uniqueEdgeId(st, spec.from, spec.to, spec.id),
+      id,
       from: spec.from,
       to: spec.to,
-      cost: typeof spec.cost === "number" ? spec.cost : 1,
-      condition: spec.condition ? parseCondition(spec.condition) : undefined,
+      cost: spec.cost === undefined ? 1 : spec.cost,
+      condition,
       actions: (spec.actions ?? []).map((a) => ({ type: a.type, data: a.data ? cloneJson(a.data) : {} })),
       meta: spec.meta ? cloneJson(spec.meta) : {},
       index: st.nextEdge++,
@@ -238,16 +303,17 @@ export function registerScreens(...args: unknown[]): NavigationTree {
     template ?? (isPlainObject(input) && typeof input.template === "string" ? input.template : undefined);
   const st = newStage(tree);
   stageScreens(st, input, defaultTemplate, options);
-  commit(st);
+  finish(st, options);
   return tree;
 }
 
 /** Register edges (transitions) on a tree in place. Returns the same tree. */
 export function registerEdges(...args: unknown[]): NavigationTree {
   const { tree, rest } = splitTarget(args);
+  const options = (isPlainObject(rest[1]) ? rest[1] : {}) as RegisterOptions;
   const st = newStage(tree);
   stageEdges(st, rest[0]);
-  commit(st);
+  finish(st, options);
   return tree;
 }
 
@@ -258,9 +324,10 @@ export function registerEdges(...args: unknown[]): NavigationTree {
  */
 export function registerActions(...args: unknown[]): NavigationTree {
   const { tree, rest } = splitTarget(args);
-  const [screenId, actionsInput, targetScreenId] = rest;
+  const [screenId, actionsInput, third, fourth] = rest;
   const parent = String(screenId);
-  const destination = typeof targetScreenId === "string" ? targetScreenId : parent;
+  const destination = typeof third === "string" ? third : parent;
+  const options = (isPlainObject(third) ? third : isPlainObject(fourth) ? fourth : {}) as RegisterOptions;
   const normalized = Array.isArray(actionsInput)
     ? actionsInput
     : isPlainObject(actionsInput) && Array.isArray(actionsInput.actions)
@@ -284,7 +351,7 @@ export function registerActions(...args: unknown[]): NavigationTree {
     { from: parent, to: actionId, actions: [] },
     { from: actionId, to: destination, actions: normalized },
   ]);
-  commit(st);
+  finish(st, options);
   return tree;
 }
 
@@ -294,9 +361,10 @@ export function augmentTree(...args: unknown[]): NavigationTree {
   const patch = rest[0];
   if (isPlainObject(patch)) {
     const st = newStage(tree);
-    if (patch.screens) stageScreens(st, patch.screens, typeof patch.template === "string" ? patch.template : undefined, {});
+    const options = (isPlainObject(rest[1]) ? rest[1] : {}) as RegisterOptions;
+    if (patch.screens) stageScreens(st, patch.screens, typeof patch.template === "string" ? patch.template : undefined, options);
     if (patch.edges) stageEdges(st, patch.edges);
-    commit(st);
+    finish(st, options);
   }
   return tree;
 }
@@ -380,9 +448,9 @@ declare module "./graph" {
   interface NavigationTree {
     registerScreens(input: unknown, template?: string | RegisterOptions, options?: RegisterOptions): NavigationTree;
     addScreens(input: unknown, template?: string | RegisterOptions, options?: RegisterOptions): NavigationTree;
-    registerEdges(input: unknown): NavigationTree;
-    addEdges(input: unknown): NavigationTree;
-    registerActions(screenId: string, actions: unknown, targetScreenId?: string): NavigationTree;
+    registerEdges(input: unknown, options?: RegisterOptions): NavigationTree;
+    addEdges(input: unknown, options?: RegisterOptions): NavigationTree;
+    registerActions(screenId: string, actions: unknown, targetScreenId?: string | RegisterOptions, options?: RegisterOptions): NavigationTree;
     unregisterScreens(selector: ScreenSelector): NavigationTree;
     unregisterEdges(ids: string | readonly string[]): NavigationTree;
     clearDynamic(): NavigationTree;

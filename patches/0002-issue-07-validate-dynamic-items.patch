@@ -1,0 +1,697 @@
+From d66e4bc62cb50590b8eefacb81ef6cb603f57796 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 14 Oct 2026 13:19:42 +1100
+Subject: [PATCH] Validate runtime registrations like a parsed graph (issue 7)
+
+registerEdges, registerScreens and registerActions previously accepted
+anything, so an unknown action type or a payload that breaks the schema got
+through with no diagnostics.
+
+- Per-item validation is split out of validateGraph into validateScreenRecord
+  and validateEdgeRecord, so file and runtime items share one set of checks.
+- Registration stages items, validates them (endpoints, schema action types,
+  payloads, variable references, costs, conditions, metadata), then commits.
+- Failures throw ValidationError with diagnostics and change nothing.
+  { diagnostics: "collect" } registers the valid items and records the rest
+  on tree.diagnostics.
+- Unknown template, duplicate explicit edge id and bad conditions are now
+  diagnostics instead of bare Errors.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01TA5teBRYJzEcA4bcZsAuTm
+---
+ AGENTS.md             |   1 +
+ CHANGELOG.md          |   2 +
+ README.md             |   3 +
+ llms.txt              |   3 +-
+ src/dynamic.ts        | 124 +++++++++++++++++++++-------
+ src/graph.ts          | 183 ++++++++++++++++++++++++++++--------------
+ src/index.ts          |   3 +
+ tests/dynamic.test.ts | 109 +++++++++++++++++++++++++
+ 8 files changed, 337 insertions(+), 91 deletions(-)
+
+diff --git a/AGENTS.md b/AGENTS.md
+index a9fa120..7569401 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -19,6 +19,7 @@ Checklist when writing code against the API (dynamic graphs):
+ - Dynamic registration (`registerScreens`, `registerEdges`, `registerActions`) changes the tree in place and returns the same tree. Use `cloneTree` for an independent copy.
+ - Without a tree argument, registration uses the shared tree set by `setDefaultTree` or `setAsDefault: true`.
+ - Added items are flagged `dynamic`. Remove them with `unregisterScreens`, `unregisterEdges` or `clearDynamic`. File items cannot be removed.
++- Registered screens, edges and actions are validated like a parsed graph. Action types must exist in the tree's schema. Failures throw `ValidationError`; `{ diagnostics: "collect" }` keeps the valid items instead.
+ - Template copies clone incident edges when `cloneEdges` is true. A registration call is all or nothing.
+ 
+ Checklist when writing code against the API:
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 89ba425..676da49 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -9,6 +9,8 @@ Keep a Changelog and the project follows semantic versioning.
+ - Added a shared default tree (`setDefaultTree`, `getDefaultTree`, `setAsDefault`) so registration works without passing a tree around.
+ - Added `createTree`, `unregisterScreens`, `unregisterEdges` and `clearDynamic`. File screens and edges cannot be removed.
+ - Registration is all or nothing. A failed call leaves the tree unchanged.
++- Registered screens, edges and actions are now validated with the same checks as a parsed graph, so unknown action types, bad payloads, undeclared variables and unknown endpoints are rejected with a `ValidationError`. `{ diagnostics: "collect" }` keeps the valid items instead.
++- Exposed `validateScreenRecord` and `validateEdgeRecord`, the per-item checks behind `validateGraph`.
+ - Edge ids for registered edges are deterministic, with no random suffix.
+ - Removed the `MutableGraphData` type. The no-tree form of `register_screens` no longer builds an empty tree, and now uses the default tree.
+ 
+diff --git a/README.md b/README.md
+index 6eec412..339d8a7 100644
+--- a/README.md
++++ b/README.md
+@@ -448,6 +448,9 @@ How it behaves:
+ 
+ - A registered screen or edge is flagged `dynamic: true`. A screen made from a template also records `template`.
+ - Registration is all or nothing. If any part of a call fails, the tree is left exactly as it was.
++- Everything you register is validated with the same checks as a parsed graph: unknown screens, action types that are not in the tree's schema, payloads that break the schema, `$NAME$` references to undeclared variables, bad costs and conditions, and invalid screen or edge metadata. A failure throws a `ValidationError` whose `diagnostics` list every problem.
++- Pass `{ diagnostics: "collect" }` as the last argument to register the valid items anyway. The invalid ones are skipped and their problems are appended to `tree.diagnostics`.
++- The schema belongs to the tree. To register a custom action type at runtime, create the tree with a schema that declares it (`indexTreeFromText(text, { schema })` or `createTree({ schema })`).
+ - Edge ids are deterministic: `from->to`, then `from->to#2`, `#3`.
+ - A `Path` holds screen ids, not copies. If you unregister a screen that a path uses, `buildInstructions` for that path throws. Recalculate after changing the tree.
+ 
+diff --git a/llms.txt b/llms.txt
+index b61199a..3f0b411 100644
+--- a/llms.txt
++++ b/llms.txt
+@@ -94,7 +94,8 @@ Errors: all extend `AppNavError` with `code`, and `file`, `line`, `column`, `ids
+ - `registerScreens([tree,] ids, template?)` clones the template screen as `template:id` and copies the edges touching it. `registerEdges([tree,] edges)`, `registerActions([tree,] screenId, actions)`. Also methods on the tree and snake_case aliases (`register_screens`).
+ - Remove with `unregisterScreens(idOrIdsOrTemplate)`, `unregisterEdges(ids)`, `clearDynamic()`. File screens and edges cannot be removed.
+ - `createTree()` makes an empty tree. `cloneTree(tree)` makes an independent copy.
+-- A failed registration changes nothing. A Path made before a removal throws when built.
++- Registered items get the same validation as a parsed graph (action types, payloads, variables, endpoints, conditions). Failures throw `ValidationError` with `diagnostics`; pass `{ diagnostics: "collect" }` to keep the valid items and record the rest in `tree.diagnostics`. A failed call changes nothing.
++- Custom action types must be declared in the tree's schema. A Path made before a removal throws when built.
+ 
+ ## Common mistakes:
+ 
+diff --git a/src/dynamic.ts b/src/dynamic.ts
+index af455d4..bb42bfa 100644
+--- a/src/dynamic.ts
++++ b/src/dynamic.ts
+@@ -1,17 +1,25 @@
+ import { parseCondition } from "./conditions";
+ import { requireDefaultTree } from "./default-tree";
+-import { AppNavError, UnknownScreenError } from "./errors";
+-import { NavigationTree, indexGraph } from "./graph";
++import { AppNavError, ValidationError } from "./errors";
++import {
++  NavigationTree,
++  indexGraph,
++  validateEdgeRecord,
++  validateScreenRecord,
++  type RecordValidationEnv,
++  type ValidateOptions,
++} from "./graph";
+ import { cloneJson, deepFreeze, isPlainObject } from "./json";
+ import type { ResolvedSchema, SchemaDefinition } from "./schema";
+-import type { ActionDeclaration, Edge, JsonObject, Screen, VariableDeclaration } from "./types";
++import type { ActionDeclaration, Diagnostic, Edge, JsonObject, Screen, VariableDeclaration } from "./types";
+ 
+ /**
+  * Runtime registration. Screens, edges and actions are added to a live tree in
+  * place and flagged `dynamic`. Every function takes the tree as its first
+  * argument, or omits it to use the shared default tree (`setDefaultTree`).
+- * Registration is staged first and committed only when the whole call
+- * succeeds, so a failed call leaves the tree untouched.
++ * Registration is staged, validated with the same checks a parsed graph gets
++ * (action types, payloads, variables, conditions, endpoints), and committed
++ * only when the whole call succeeds, so a failed call leaves the tree untouched.
+  */
+ 
+ export interface ScreenSpec {
+@@ -36,9 +44,15 @@ export interface EdgeSpec {
+   actions?: ReadonlyArray<{ type: string; data?: JsonObject }>;
+ }
+ 
+-export interface RegisterOptions {
++export interface RegisterOptions extends ValidateOptions {
+   /** Copy edges incident to the template screen. Default true. */
+   cloneEdges?: boolean;
++  /**
++   * What to do when something fails validation. "throw" (default) raises a
++   * ValidationError and registers nothing. "collect" registers the valid items,
++   * skips the rest, and records the problems in `tree.diagnostics`.
++   */
++  diagnostics?: "throw" | "collect";
+ }
+ 
+ // ---------------------------------------------------------------------------
+@@ -54,6 +68,8 @@ interface Stage {
+   readonly screens: Map<string, Screen>;
+   readonly edges: Edge[];
+   readonly usedEdgeIds: Set<string>;
++  /** Problems found while staging, before validation runs. */
++  readonly diagnostics: Diagnostic[];
+   nextScreen: number;
+   nextEdge: number;
+ }
+@@ -64,6 +80,7 @@ function newStage(tree: NavigationTree): Stage {
+     screens: new Map(),
+     edges: [],
+     usedEdgeIds: new Set(tree.edges.map((e) => e.id)),
++    diagnostics: [],
+     nextScreen: tree._nextScreenIndex(),
+     nextEdge: tree._nextEdgeIndex(),
+   };
+@@ -72,10 +89,16 @@ function newStage(tree: NavigationTree): Stage {
+ const hasScreen = (st: Stage, id: string) => st.screens.has(id) || st.tree.hasScreen(id);
+ const getScreen = (st: Stage, id: string) => st.screens.get(id) ?? st.tree.screens.get(id);
+ 
+-/** Deterministic edge id: `from->to`, then `from->to#2`, `#3`, and so on. */
+-function uniqueEdgeId(st: Stage, from: string, to: string, explicit?: string): string {
++const problem = (st: Stage, code: string, message: string, ids: string[]) =>
++  st.diagnostics.push({ severity: "error", code, message, file: st.tree.file, ids });
++
++/** Deterministic edge id: `from->to`, then `from->to#2`, `#3`, and so on. Undefined for a duplicate explicit id. */
++function uniqueEdgeId(st: Stage, from: string, to: string, explicit?: string): string | undefined {
+   if (explicit !== undefined) {
+-    if (st.usedEdgeIds.has(explicit)) throw new AppNavError("DUPLICATE_EDGE", `Duplicate edge id "${explicit}"`, { ids: [explicit] });
++    if (st.usedEdgeIds.has(explicit)) {
++      problem(st, "DUPLICATE_EDGE", `Duplicate edge id "${explicit}"`, [explicit]);
++      return undefined;
++    }
+     st.usedEdgeIds.add(explicit);
+     return explicit;
+   }
+@@ -86,9 +109,38 @@ function uniqueEdgeId(st: Stage, from: string, to: string, explicit?: string): s
+   return id;
+ }
+ 
+-function commit(st: Stage): void {
+-  for (const screen of st.screens.values()) st.tree._addScreen(deepFreeze(screen));
+-  for (const edge of st.edges) st.tree._addEdge(deepFreeze(edge));
++/**
++ * Validate everything staged with the same checks a parsed graph gets, then
++ * commit. In "throw" mode any problem aborts the whole call. In "collect" mode
++ * valid items are committed and the problems are recorded on the tree.
++ */
++function finish(st: Stage, options: RegisterOptions): void {
++  const tree = st.tree;
++  const bad = new Set<string>();
++  const env: RecordValidationEnv = {
++    schema: tree.schema,
++    declarations: tree.variables,
++    hasScreen: (id) => !bad.has(id) && hasScreen(st, id),
++    options,
++    file: tree.file,
++  };
++  const found: Diagnostic[] = [...st.diagnostics];
++  for (const screen of st.screens.values()) {
++    const d = validateScreenRecord(screen, env);
++    if (d.length > 0) bad.add(screen.id);
++    found.push(...d);
++  }
++  const edges: Edge[] = [];
++  for (const edge of st.edges) {
++    const d = validateEdgeRecord(edge, env);
++    found.push(...d);
++    if (d.length === 0) edges.push(edge);
++  }
++  const hasErrors = found.some((d) => d.severity === "error");
++  if (hasErrors && options.diagnostics !== "collect") throw new ValidationError(found, tree.file);
++  if (found.length > 0) tree._addDiagnostics(found);
++  for (const screen of st.screens.values()) if (!bad.has(screen.id)) tree._addScreen(deepFreeze(screen));
++  for (const edge of edges) tree._addEdge(deepFreeze(edge));
+ }
+ 
+ function cloneActions(actions: readonly ActionDeclaration[]): ActionDeclaration[] {
+@@ -160,7 +212,10 @@ function stageScreens(st: Stage, input: unknown, defaultTemplate: string | undef
+     if (hasScreen(st, newId)) continue;
+ 
+     const base = tpl ? getScreen(st, tpl) : undefined;
+-    if (tpl && !base) throw new UnknownScreenError(tpl);
++    if (tpl && !base) {
++      problem(st, "UNKNOWN_SCREEN", `Unknown template screen "${tpl}"`, [tpl]);
++      continue;
++    }
+ 
+     const screen: Screen = {
+       id: newId,
+@@ -178,7 +233,7 @@ function stageScreens(st: Stage, input: unknown, defaultTemplate: string | undef
+         const from = e.from === tpl ? newId : e.from;
+         const to = e.to === tpl ? newId : e.to;
+         st.edges.push({
+-          id: uniqueEdgeId(st, from, to),
++          id: uniqueEdgeId(st, from, to) as string,
+           from,
+           to,
+           cost: e.cost,
+@@ -195,13 +250,23 @@ function stageScreens(st: Stage, input: unknown, defaultTemplate: string | undef
+ 
+ function stageEdges(st: Stage, input: unknown): void {
+   for (const spec of normalizeEdgeSpecs(input)) {
+-    for (const end of [spec.from, spec.to]) if (!hasScreen(st, end)) throw new UnknownScreenError(end);
++    let condition: Edge["condition"];
++    if (spec.condition) {
++      try {
++        condition = parseCondition(spec.condition);
++      } catch (e) {
++        problem(st, "INVALID_CONDITION", e instanceof Error ? e.message : String(e), [`${spec.from}->${spec.to}`]);
++        continue;
++      }
++    }
++    const id = uniqueEdgeId(st, spec.from, spec.to, spec.id);
++    if (id === undefined) continue;
+     st.edges.push({
+-      id: uniqueEdgeId(st, spec.from, spec.to, spec.id),
++      id,
+       from: spec.from,
+       to: spec.to,
+-      cost: typeof spec.cost === "number" ? spec.cost : 1,
+-      condition: spec.condition ? parseCondition(spec.condition) : undefined,
++      cost: spec.cost === undefined ? 1 : spec.cost,
++      condition,
+       actions: (spec.actions ?? []).map((a) => ({ type: a.type, data: a.data ? cloneJson(a.data) : {} })),
+       meta: spec.meta ? cloneJson(spec.meta) : {},
+       index: st.nextEdge++,
+@@ -238,16 +303,17 @@ export function registerScreens(...args: unknown[]): NavigationTree {
+     template ?? (isPlainObject(input) && typeof input.template === "string" ? input.template : undefined);
+   const st = newStage(tree);
+   stageScreens(st, input, defaultTemplate, options);
+-  commit(st);
++  finish(st, options);
+   return tree;
+ }
+ 
+ /** Register edges (transitions) on a tree in place. Returns the same tree. */
+ export function registerEdges(...args: unknown[]): NavigationTree {
+   const { tree, rest } = splitTarget(args);
++  const options = (isPlainObject(rest[1]) ? rest[1] : {}) as RegisterOptions;
+   const st = newStage(tree);
+   stageEdges(st, rest[0]);
+-  commit(st);
++  finish(st, options);
+   return tree;
+ }
+ 
+@@ -258,9 +324,10 @@ export function registerEdges(...args: unknown[]): NavigationTree {
+  */
+ export function registerActions(...args: unknown[]): NavigationTree {
+   const { tree, rest } = splitTarget(args);
+-  const [screenId, actionsInput, targetScreenId] = rest;
++  const [screenId, actionsInput, third, fourth] = rest;
+   const parent = String(screenId);
+-  const destination = typeof targetScreenId === "string" ? targetScreenId : parent;
++  const destination = typeof third === "string" ? third : parent;
++  const options = (isPlainObject(third) ? third : isPlainObject(fourth) ? fourth : {}) as RegisterOptions;
+   const normalized = Array.isArray(actionsInput)
+     ? actionsInput
+     : isPlainObject(actionsInput) && Array.isArray(actionsInput.actions)
+@@ -284,7 +351,7 @@ export function registerActions(...args: unknown[]): NavigationTree {
+     { from: parent, to: actionId, actions: [] },
+     { from: actionId, to: destination, actions: normalized },
+   ]);
+-  commit(st);
++  finish(st, options);
+   return tree;
+ }
+ 
+@@ -294,9 +361,10 @@ export function augmentTree(...args: unknown[]): NavigationTree {
+   const patch = rest[0];
+   if (isPlainObject(patch)) {
+     const st = newStage(tree);
+-    if (patch.screens) stageScreens(st, patch.screens, typeof patch.template === "string" ? patch.template : undefined, {});
++    const options = (isPlainObject(rest[1]) ? rest[1] : {}) as RegisterOptions;
++    if (patch.screens) stageScreens(st, patch.screens, typeof patch.template === "string" ? patch.template : undefined, options);
+     if (patch.edges) stageEdges(st, patch.edges);
+-    commit(st);
++    finish(st, options);
+   }
+   return tree;
+ }
+@@ -380,9 +448,9 @@ declare module "./graph" {
+   interface NavigationTree {
+     registerScreens(input: unknown, template?: string | RegisterOptions, options?: RegisterOptions): NavigationTree;
+     addScreens(input: unknown, template?: string | RegisterOptions, options?: RegisterOptions): NavigationTree;
+-    registerEdges(input: unknown): NavigationTree;
+-    addEdges(input: unknown): NavigationTree;
+-    registerActions(screenId: string, actions: unknown, targetScreenId?: string): NavigationTree;
++    registerEdges(input: unknown, options?: RegisterOptions): NavigationTree;
++    addEdges(input: unknown, options?: RegisterOptions): NavigationTree;
++    registerActions(screenId: string, actions: unknown, targetScreenId?: string | RegisterOptions, options?: RegisterOptions): NavigationTree;
+     unregisterScreens(selector: ScreenSelector): NavigationTree;
+     unregisterEdges(ids: string | readonly string[]): NavigationTree;
+     clearDynamic(): NavigationTree;
+diff --git a/src/graph.ts b/src/graph.ts
+index 9d445e8..9860872 100644
+--- a/src/graph.ts
++++ b/src/graph.ts
+@@ -18,6 +18,7 @@ import {
+   type SchemaDefinition,
+ } from "./schema";
+ import type {
++  ActionDeclaration,
+   Condition,
+   Diagnostic,
+   Edge,
+@@ -45,6 +46,118 @@ export interface ValidationResult {
+   diagnostics: Diagnostic[];
+ }
+ 
++/** Everything a single screen or edge needs to be validated on its own. */
++export interface RecordValidationEnv {
++  schema: ResolvedSchema;
++  /** Declared variables, used to check `$NAME$` references. */
++  declarations: Readonly<Record<string, VariableDeclaration>>;
++  /** Whether a screen id exists (including screens about to be added). */
++  hasScreen(id: string): boolean;
++  options?: ValidateOptions;
++  file?: string;
++}
++
++const diag = (
++  env: RecordValidationEnv,
++  code: string,
++  message: string,
++  at?: { line?: number; column?: number },
++  ids?: string[],
++): Diagnostic => ({ severity: "error", code, message, file: env.file, line: at?.line, column: at?.column, ids });
++
++/** Validate one screen against the schema. Used for parsed screens and for runtime registration. */
++export function validateScreenRecord(
++  screen: { id: string; meta: JsonObject; line?: number; column?: number },
++  env: RecordValidationEnv,
++): Diagnostic[] {
++  const out: Diagnostic[] = [];
++  for (const [key, sub] of Object.entries(env.schema.screenMetadata)) {
++    if (key in screen.meta) {
++      for (const p of validateAgainst(screen.meta[key], sub, `screen "${screen.id}" metadata ${key}`)) {
++        out.push(diag(env, "INVALID_SCREEN_METADATA", p, screen, [screen.id]));
++      }
++    }
++  }
++  return out;
++}
++
++/**
++ * Validate one edge: endpoints, cost, condition, metadata, action types and
++ * payloads, and variable references. Used for parsed edges and for runtime
++ * registration, so both get identical checks.
++ */
++export function validateEdgeRecord(
++  e: {
++    id?: string;
++    from: string;
++    to: string;
++    cost?: number;
++    condition?: string | { source: string };
++    actions: readonly ActionDeclaration[];
++    meta: JsonObject;
++    line?: number;
++    column?: number;
++  },
++  env: RecordValidationEnv,
++): Diagnostic[] {
++  const out: Diagnostic[] = [];
++  const err = (code: string, message: string, at?: { line?: number; column?: number }, ids?: string[]) =>
++    out.push(diag(env, code, message, at, ids));
++  const options = env.options ?? {};
++  const operators = { ...BUILTIN_OPERATORS, ...(options.conditionOperators ?? {}) };
++  const label = e.id ?? `${e.from}->${e.to}`;
++
++  if (!env.hasScreen(e.from)) err("UNKNOWN_SCREEN", `Edge "${label}" references unknown screen "${e.from}"`, e, [label, e.from]);
++  if (!env.hasScreen(e.to)) err("UNKNOWN_SCREEN", `Edge "${label}" references unknown screen "${e.to}"`, e, [label, e.to]);
++  if (e.cost !== undefined && (!Number.isFinite(e.cost) || e.cost < 0)) {
++    err("INVALID_COST", `Edge "${label}" has invalid cost ${e.cost}. Costs must be finite and non-negative`, e, [label]);
++  }
++  if (e.condition !== undefined) {
++    try {
++      const cond = parseCondition(typeof e.condition === "string" ? e.condition : e.condition.source);
++      for (const op of conditionOperatorNames(cond.ast)) {
++        if (!["==", "!=", "<", "<=", ">", ">="].includes(op) && !operators[op]) {
++          err("UNKNOWN_OPERATOR", `Edge "${label}" uses unknown condition operator "${op}"`, e, [label, op]);
++        }
++      }
++      if (options.strictConditions) {
++        for (const ref of conditionRefs(cond.ast)) {
++          const root = ref.split(".")[0] as string;
++          if (!env.declarations[root]) err("UNKNOWN_CONDITION_VARIABLE", `Edge "${label}" condition references undeclared variable "${root}"`, e, [label, root]);
++        }
++      }
++    } catch (ex) {
++      err("INVALID_CONDITION", ex instanceof AppNavError ? ex.message : String(ex), e, [label]);
++    }
++  }
++  for (const [key, sub] of Object.entries(env.schema.edgeMetadata)) {
++    if (key in e.meta) {
++      for (const p of validateAgainst(e.meta[key], sub, `edge "${label}" attribute ${key}`)) {
++        err("INVALID_EDGE_METADATA", p, e, [label]);
++      }
++    }
++  }
++  e.actions.forEach((a, i) => {
++    const where = { line: a.line, column: a.column };
++    const def = env.schema.actions[a.type];
++    if (!def) {
++      err("UNKNOWN_ACTION", `Unknown action type "${a.type}" on edge "${label}"`, where, [label, a.type]);
++    } else {
++      for (const p of validateAgainst(a.data, { ...def, type: "object" }, `edge "${label}" action ${i + 1} (${a.type})`, {
++        declarations: env.declarations,
++      })) {
++        err("INVALID_ACTION_PAYLOAD", p, where, [label, a.type]);
++      }
++    }
++    if (!options.allowUndeclaredVariables) {
++      for (const name of collectReferences(a.data)) {
++        if (!env.declarations[name]) err("UNDEFINED_VARIABLE", `Edge "${label}" action ${i + 1} uses undeclared variable "${name}"`, where, [label, name]);
++      }
++    }
++  });
++  return out;
++}
++
+ /** Semantic validation of a parsed graph. Never throws for graph problems. */
+ export function validateGraph(
+   graph: Graph,
+@@ -82,79 +195,25 @@ export function validateGraph(
+     }
+   }
+ 
++  const screens = new Set(graph.screens.map((s) => s.id));
++  const env: RecordValidationEnv = { schema: resolved, declarations: decls, hasScreen: (id) => screens.has(id), options, file };
++
+   // Screens
+-  const screens = new Set<string>();
++  const seenScreens = new Set<string>();
+   for (const s of graph.screens) {
+-    if (screens.has(s.id)) err("DUPLICATE_SCREEN", `Duplicate screen id "${s.id}"`, s, [s.id]);
+-    screens.add(s.id);
+-    for (const [key, sub] of Object.entries(resolved.screenMetadata)) {
+-      if (key in s.meta) {
+-        for (const p of validateAgainst(s.meta[key], sub, `screen "${s.id}" metadata ${key}`)) {
+-          err("INVALID_SCREEN_METADATA", p, s, [s.id]);
+-        }
+-      } else if (sub.required) {
+-        // required here is for object sub-schemas, ignore for top level keys
+-      }
+-    }
++    if (seenScreens.has(s.id)) err("DUPLICATE_SCREEN", `Duplicate screen id "${s.id}"`, s, [s.id]);
++    seenScreens.add(s.id);
++    out.push(...validateScreenRecord(s, env));
+   }
+ 
+   // Edges
+   const explicit = new Set<string>();
+-  const operators = { ...BUILTIN_OPERATORS, ...(options.conditionOperators ?? {}) };
+   for (const e of graph.edges) {
+-    const label = e.id ?? `${e.from}->${e.to}`;
+-    if (!screens.has(e.from)) err("UNKNOWN_SCREEN", `Edge "${label}" references unknown screen "${e.from}"`, e, [label, e.from]);
+-    if (!screens.has(e.to)) err("UNKNOWN_SCREEN", `Edge "${label}" references unknown screen "${e.to}"`, e, [label, e.to]);
+     if (e.id !== undefined) {
+       if (explicit.has(e.id)) err("DUPLICATE_EDGE", `Duplicate edge id "${e.id}"`, e, [e.id]);
+       explicit.add(e.id);
+     }
+-    if (e.cost !== undefined && (!Number.isFinite(e.cost) || e.cost < 0)) {
+-      err("INVALID_COST", `Edge "${label}" has invalid cost ${e.cost}. Costs must be finite and non-negative`, e, [label]);
+-    }
+-    if (e.condition !== undefined) {
+-      try {
+-        const cond = parseCondition(e.condition);
+-        for (const op of conditionOperatorNames(cond.ast)) {
+-          if (!["==", "!=", "<", "<=", ">", ">="].includes(op) && !operators[op]) {
+-            err("UNKNOWN_OPERATOR", `Edge "${label}" uses unknown condition operator "${op}"`, e, [label, op]);
+-          }
+-        }
+-        if (options.strictConditions) {
+-          for (const ref of conditionRefs(cond.ast)) {
+-            const root = ref.split(".")[0] as string;
+-            if (!decls[root]) err("UNKNOWN_CONDITION_VARIABLE", `Edge "${label}" condition references undeclared variable "${root}"`, e, [label, root]);
+-          }
+-        }
+-      } catch (ex) {
+-        err("INVALID_CONDITION", ex instanceof AppNavError ? ex.message : String(ex), e, [label]);
+-      }
+-    }
+-    for (const [key, sub] of Object.entries(resolved.edgeMetadata)) {
+-      if (key in e.meta) {
+-        for (const p of validateAgainst(e.meta[key], sub, `edge "${label}" attribute ${key}`)) {
+-          err("INVALID_EDGE_METADATA", p, e, [label]);
+-        }
+-      }
+-    }
+-    e.actions.forEach((a, i) => {
+-      const where = { line: a.line, column: a.column };
+-      const def = resolved.actions[a.type];
+-      if (!def) {
+-        err("UNKNOWN_ACTION", `Unknown action type "${a.type}" on edge "${label}"`, where, [label, a.type]);
+-      } else {
+-        for (const p of validateAgainst(a.data, { ...def, type: "object" }, `edge "${label}" action ${i + 1} (${a.type})`, {
+-          declarations: decls,
+-        })) {
+-          err("INVALID_ACTION_PAYLOAD", p, where, [label, a.type]);
+-        }
+-      }
+-      if (!options.allowUndeclaredVariables) {
+-        for (const name of collectReferences(a.data)) {
+-          if (!decls[name]) err("UNDEFINED_VARIABLE", `Edge "${label}" action ${i + 1} uses undeclared variable "${name}"`, where, [label, name]);
+-        }
+-      }
+-    });
++    out.push(...validateEdgeRecord(e, env));
+   }
+ 
+   const errors = out.filter((d) => d.severity === "error");
+diff --git a/src/index.ts b/src/index.ts
+index 4d62004..047604a 100644
+--- a/src/index.ts
++++ b/src/index.ts
+@@ -42,10 +42,13 @@ export {
+   indexGraph,
+   indexTree,
+   indexTreeFromText,
++  validateEdgeRecord,
+   validateGraph,
++  validateScreenRecord,
+   type IndexFileOptions,
+   type IndexOptions,
+   type NavTree,
++  type RecordValidationEnv,
+   type ValidateOptions,
+   type ValidationResult,
+ } from "./graph";
+diff --git a/tests/dynamic.test.ts b/tests/dynamic.test.ts
+index f1ceffd..00148fd 100644
+--- a/tests/dynamic.test.ts
++++ b/tests/dynamic.test.ts
+@@ -1,6 +1,7 @@
+ import { afterEach, describe, expect, it } from "vitest";
+ import {
+   NavigationTree,
++  ValidationError,
+   buildInstructionsSync,
+   calculatePath,
+   clearDynamic,
+@@ -188,3 +189,111 @@ describe("cloneTree", () => {
+     expect(tree.hasScreen("only-here")).toBe(false);
+   });
+ });
++
++const VARS = `NAVGRAPH/2
++VAR ITEM : string = "x"
++SCREEN a "A"
++SCREEN b "B"
++a -> b { DO TAP { "target": "Go" } }
++END`;
++
++const failure = (fn: () => unknown): ValidationError => {
++  try {
++    fn();
++  } catch (e) {
++    expect(e).toBeInstanceOf(ValidationError);
++    return e as ValidationError;
++  }
++  throw new Error("expected the call to throw");
++};
++const codesOf = (e: ValidationError) => e.diagnostics.map((d) => d.code);
++
++describe("validation of registered items", () => {
++  it("rejects unknown action types and leaves the tree unchanged", () => {
++    const tree = indexTreeFromText(VARS);
++    const edges = tree.edges.length;
++    const err = failure(() => registerEdges(tree, [{ from: "a", to: "b", actions: [{ type: "TOTALLY_FAKE", data: {} }] }]));
++    expect(codesOf(err)).toContain("UNKNOWN_ACTION");
++    expect(tree.edges.length).toBe(edges);
++  });
++
++  it("checks action payloads against the schema", () => {
++    const tree = indexTreeFromText(VARS);
++    expect(codesOf(failure(() => registerEdges(tree, [{ from: "a", to: "b", actions: [{ type: "TAP", data: {} }] }])))).toContain(
++      "INVALID_ACTION_PAYLOAD",
++    );
++    expect(
++      codesOf(failure(() => registerEdges(tree, [{ from: "a", to: "b", actions: [{ type: "TAP", data: { target: 5 } }] }]))),
++    ).toContain("INVALID_ACTION_PAYLOAD");
++    registerEdges(tree, [{ from: "a", to: "b", actions: [{ type: "TAP", data: { target: "ok" } }] }]);
++  });
++
++  it("requires variable references to be declared", () => {
++    const tree = indexTreeFromText(VARS);
++    const bad = { from: "a", to: "b", actions: [{ type: "TAP", data: { target: "$GHOST$" } }] };
++    expect(codesOf(failure(() => registerEdges(tree, [bad])))).toContain("UNDEFINED_VARIABLE");
++    registerEdges(tree, [{ from: "a", to: "b", actions: [{ type: "TAP", data: { target: "$ITEM$" } }] }]);
++    registerEdges(tree, [bad], { allowUndeclaredVariables: true });
++  });
++
++  it("reports unknown endpoints as diagnostics", () => {
++    const tree = indexTreeFromText(VARS);
++    const err = failure(() => registerEdges(tree, [{ from: "a", to: "ghost" }]));
++    expect(codesOf(err)).toEqual(["UNKNOWN_SCREEN"]);
++    expect(err.diagnostics[0]?.ids).toContain("ghost");
++  });
++
++  it("checks costs, conditions and duplicate explicit ids", () => {
++    const tree = indexTreeFromText(VARS);
++    expect(codesOf(failure(() => registerEdges(tree, [{ from: "a", to: "b", cost: -1 }])))).toContain("INVALID_COST");
++    expect(codesOf(failure(() => registerEdges(tree, [{ from: "a", to: "b", condition: "(x" }])))).toContain("INVALID_CONDITION");
++    expect(codesOf(failure(() => registerEdges(tree, [{ from: "a", to: "b", condition: "x wat y" }])))).toContain("UNKNOWN_OPERATOR");
++    registerEdges(tree, [{ from: "a", to: "b", id: "mine" }]);
++    expect(codesOf(failure(() => registerEdges(tree, [{ from: "b", to: "a", id: "mine" }])))).toContain("DUPLICATE_EDGE");
++  });
++
++  it("validates screen metadata against the schema", () => {
++    const tree = createTree({ schema: { schemaVersion: 1, extends: "default", screenMetadata: { icon: { type: "string" } } } });
++    expect(codesOf(failure(() => registerScreens(tree, [{ id: "s", meta: { icon: 5 } }])))).toContain("INVALID_SCREEN_METADATA");
++    registerScreens(tree, [{ id: "s", meta: { icon: "star" } }]);
++  });
++
++  it("accepts action types the tree's schema declares", () => {
++    const tree = createTree({
++      schema: { schemaVersion: 1, extends: "default", actions: { SCAN_QR: { required: ["camera"], properties: { camera: { type: "string" } } } } },
++    });
++    registerScreens(tree, [{ id: "a" }, { id: "b" }]);
++    registerEdges(tree, [{ from: "a", to: "b", actions: [{ type: "SCAN_QR", data: { camera: "back" } }] }]);
++    expect(tree.edge("a->b")?.actions[0]?.type).toBe("SCAN_QR");
++  });
++
++  it("validates registerActions payloads too", () => {
++    const tree = indexTreeFromText(VARS);
++    const err = failure(() => tree.registerActions("a", [{ type: "REMOVE_ITEM", data: {} }]));
++    expect(codesOf(err)).toContain("UNKNOWN_ACTION");
++    expect(tree.screens.size).toBe(2);
++  });
++
++  it("reports an unknown template as a diagnostic", () => {
++    const tree = indexTreeFromText(VARS);
++    const err = failure(() => registerScreens(tree, ["p1"], "nope"));
++    expect(codesOf(err)).toEqual(["UNKNOWN_SCREEN"]);
++  });
++
++  it("collect mode registers the valid items and records the problems", () => {
++    const tree = indexTreeFromText(VARS);
++    registerEdges(
++      tree,
++      [
++        { from: "a", to: "b", id: "good", actions: [{ type: "TAP", data: { target: "ok" } }] },
++        { from: "a", to: "b", id: "bad", actions: [{ type: "NOPE", data: {} }] },
++        { from: "a", to: "ghost", id: "worse" },
++      ],
++      { diagnostics: "collect" },
++    );
++    expect(tree.edge("good")).toBeDefined();
++    expect(tree.edge("bad")).toBeUndefined();
++    expect(tree.edge("worse")).toBeUndefined();
++    expect(tree.diagnostics.map((d) => d.code).sort()).toEqual(["UNKNOWN_ACTION", "UNKNOWN_SCREEN"]);
++  });
++});
+-- 
+2.43.0
+

@@ -42,10 +42,13 @@ export {
   indexGraph,
   indexTree,
   indexTreeFromText,
+  validateEdgeRecord,
   validateGraph,
+  validateScreenRecord,
   type IndexFileOptions,
   type IndexOptions,
   type NavTree,
+  type RecordValidationEnv,
   type ValidateOptions,
   type ValidationResult,
 } from "./graph";

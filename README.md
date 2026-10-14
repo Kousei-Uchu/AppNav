@@ -448,6 +448,9 @@ How it behaves:
 
 - A registered screen or edge is flagged `dynamic: true`. A screen made from a template also records `template`.
 - Registration is all or nothing. If any part of a call fails, the tree is left exactly as it was.
+- Everything you register is validated with the same checks as a parsed graph: unknown screens, action types that are not in the tree's schema, payloads that break the schema, `$NAME$` references to undeclared variables, bad costs and conditions, and invalid screen or edge metadata. A failure throws a `ValidationError` whose `diagnostics` list every problem.
+- Pass `{ diagnostics: "collect" }` as the last argument to register the valid items anyway. The invalid ones are skipped and their problems are appended to `tree.diagnostics`.
+- The schema belongs to the tree. To register a custom action type at runtime, create the tree with a schema that declares it (`indexTreeFromText(text, { schema })` or `createTree({ schema })`).
 - Edge ids are deterministic: `from->to`, then `from->to#2`, `#3`.
 - A `Path` holds screen ids, not copies. If you unregister a screen that a path uses, `buildInstructions` for that path throws. Recalculate after changing the tree.
 

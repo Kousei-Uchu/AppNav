@@ -9,6 +9,8 @@ Keep a Changelog and the project follows semantic versioning.
 - Added a shared default tree (`setDefaultTree`, `getDefaultTree`, `setAsDefault`) so registration works without passing a tree around.
 - Added `createTree`, `unregisterScreens`, `unregisterEdges` and `clearDynamic`. File screens and edges cannot be removed.
 - Registration is all or nothing. A failed call leaves the tree unchanged.
+- Registered screens, edges and actions are now validated with the same checks as a parsed graph, so unknown action types, bad payloads, undeclared variables and unknown endpoints are rejected with a `ValidationError`. `{ diagnostics: "collect" }` keeps the valid items instead.
+- Exposed `validateScreenRecord` and `validateEdgeRecord`, the per-item checks behind `validateGraph`.
 - Edge ids for registered edges are deterministic, with no random suffix.
 - Removed the `MutableGraphData` type. The no-tree form of `register_screens` no longer builds an empty tree, and now uses the default tree.
 

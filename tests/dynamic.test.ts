@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import {
   NavigationTree,
+  ValidationError,
   buildInstructionsSync,
   calculatePath,
   clearDynamic,
@@ -186,5 +187,113 @@ describe("cloneTree", () => {
     const copy = cloneTree();
     registerScreens(copy, ["only-here"]);
     expect(tree.hasScreen("only-here")).toBe(false);
+  });
+});
+
+const VARS = `NAVGRAPH/2
+VAR ITEM : string = "x"
+SCREEN a "A"
+SCREEN b "B"
+a -> b { DO TAP { "target": "Go" } }
+END`;
+
+const failure = (fn: () => unknown): ValidationError => {
+  try {
+    fn();
+  } catch (e) {
+    expect(e).toBeInstanceOf(ValidationError);
+    return e as ValidationError;
+  }
+  throw new Error("expected the call to throw");
+};
+const codesOf = (e: ValidationError) => e.diagnostics.map((d) => d.code);
+
+describe("validation of registered items", () => {
+  it("rejects unknown action types and leaves the tree unchanged", () => {
+    const tree = indexTreeFromText(VARS);
+    const edges = tree.edges.length;
+    const err = failure(() => registerEdges(tree, [{ from: "a", to: "b", actions: [{ type: "TOTALLY_FAKE", data: {} }] }]));
+    expect(codesOf(err)).toContain("UNKNOWN_ACTION");
+    expect(tree.edges.length).toBe(edges);
+  });
+
+  it("checks action payloads against the schema", () => {
+    const tree = indexTreeFromText(VARS);
+    expect(codesOf(failure(() => registerEdges(tree, [{ from: "a", to: "b", actions: [{ type: "TAP", data: {} }] }])))).toContain(
+      "INVALID_ACTION_PAYLOAD",
+    );
+    expect(
+      codesOf(failure(() => registerEdges(tree, [{ from: "a", to: "b", actions: [{ type: "TAP", data: { target: 5 } }] }]))),
+    ).toContain("INVALID_ACTION_PAYLOAD");
+    registerEdges(tree, [{ from: "a", to: "b", actions: [{ type: "TAP", data: { target: "ok" } }] }]);
+  });
+
+  it("requires variable references to be declared", () => {
+    const tree = indexTreeFromText(VARS);
+    const bad = { from: "a", to: "b", actions: [{ type: "TAP", data: { target: "$GHOST$" } }] };
+    expect(codesOf(failure(() => registerEdges(tree, [bad])))).toContain("UNDEFINED_VARIABLE");
+    registerEdges(tree, [{ from: "a", to: "b", actions: [{ type: "TAP", data: { target: "$ITEM$" } }] }]);
+    registerEdges(tree, [bad], { allowUndeclaredVariables: true });
+  });
+
+  it("reports unknown endpoints as diagnostics", () => {
+    const tree = indexTreeFromText(VARS);
+    const err = failure(() => registerEdges(tree, [{ from: "a", to: "ghost" }]));
+    expect(codesOf(err)).toEqual(["UNKNOWN_SCREEN"]);
+    expect(err.diagnostics[0]?.ids).toContain("ghost");
+  });
+
+  it("checks costs, conditions and duplicate explicit ids", () => {
+    const tree = indexTreeFromText(VARS);
+    expect(codesOf(failure(() => registerEdges(tree, [{ from: "a", to: "b", cost: -1 }])))).toContain("INVALID_COST");
+    expect(codesOf(failure(() => registerEdges(tree, [{ from: "a", to: "b", condition: "(x" }])))).toContain("INVALID_CONDITION");
+    expect(codesOf(failure(() => registerEdges(tree, [{ from: "a", to: "b", condition: "x wat y" }])))).toContain("UNKNOWN_OPERATOR");
+    registerEdges(tree, [{ from: "a", to: "b", id: "mine" }]);
+    expect(codesOf(failure(() => registerEdges(tree, [{ from: "b", to: "a", id: "mine" }])))).toContain("DUPLICATE_EDGE");
+  });
+
+  it("validates screen metadata against the schema", () => {
+    const tree = createTree({ schema: { schemaVersion: 1, extends: "default", screenMetadata: { icon: { type: "string" } } } });
+    expect(codesOf(failure(() => registerScreens(tree, [{ id: "s", meta: { icon: 5 } }])))).toContain("INVALID_SCREEN_METADATA");
+    registerScreens(tree, [{ id: "s", meta: { icon: "star" } }]);
+  });
+
+  it("accepts action types the tree's schema declares", () => {
+    const tree = createTree({
+      schema: { schemaVersion: 1, extends: "default", actions: { SCAN_QR: { required: ["camera"], properties: { camera: { type: "string" } } } } },
+    });
+    registerScreens(tree, [{ id: "a" }, { id: "b" }]);
+    registerEdges(tree, [{ from: "a", to: "b", actions: [{ type: "SCAN_QR", data: { camera: "back" } }] }]);
+    expect(tree.edge("a->b")?.actions[0]?.type).toBe("SCAN_QR");
+  });
+
+  it("validates registerActions payloads too", () => {
+    const tree = indexTreeFromText(VARS);
+    const err = failure(() => tree.registerActions("a", [{ type: "REMOVE_ITEM", data: {} }]));
+    expect(codesOf(err)).toContain("UNKNOWN_ACTION");
+    expect(tree.screens.size).toBe(2);
+  });
+
+  it("reports an unknown template as a diagnostic", () => {
+    const tree = indexTreeFromText(VARS);
+    const err = failure(() => registerScreens(tree, ["p1"], "nope"));
+    expect(codesOf(err)).toEqual(["UNKNOWN_SCREEN"]);
+  });
+
+  it("collect mode registers the valid items and records the problems", () => {
+    const tree = indexTreeFromText(VARS);
+    registerEdges(
+      tree,
+      [
+        { from: "a", to: "b", id: "good", actions: [{ type: "TAP", data: { target: "ok" } }] },
+        { from: "a", to: "b", id: "bad", actions: [{ type: "NOPE", data: {} }] },
+        { from: "a", to: "ghost", id: "worse" },
+      ],
+      { diagnostics: "collect" },
+    );
+    expect(tree.edge("good")).toBeDefined();
+    expect(tree.edge("bad")).toBeUndefined();
+    expect(tree.edge("worse")).toBeUndefined();
+    expect(tree.diagnostics.map((d) => d.code).sort()).toEqual(["UNKNOWN_ACTION", "UNKNOWN_SCREEN"]);
   });
 });

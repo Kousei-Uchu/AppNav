@@ -18,6 +18,7 @@ import {
   type SchemaDefinition,
 } from "./schema";
 import type {
+  ActionDeclaration,
   Condition,
   Diagnostic,
   Edge,
@@ -43,6 +44,118 @@ export interface ValidationResult {
   errors: Diagnostic[];
   warnings: Diagnostic[];
   diagnostics: Diagnostic[];
+}
+
+/** Everything a single screen or edge needs to be validated on its own. */
+export interface RecordValidationEnv {
+  schema: ResolvedSchema;
+  /** Declared variables, used to check `$NAME$` references. */
+  declarations: Readonly<Record<string, VariableDeclaration>>;
+  /** Whether a screen id exists (including screens about to be added). */
+  hasScreen(id: string): boolean;
+  options?: ValidateOptions;
+  file?: string;
+}
+
+const diag = (
+  env: RecordValidationEnv,
+  code: string,
+  message: string,
+  at?: { line?: number; column?: number },
+  ids?: string[],
+): Diagnostic => ({ severity: "error", code, message, file: env.file, line: at?.line, column: at?.column, ids });
+
+/** Validate one screen against the schema. Used for parsed screens and for runtime registration. */
+export function validateScreenRecord(
+  screen: { id: string; meta: JsonObject; line?: number; column?: number },
+  env: RecordValidationEnv,
+): Diagnostic[] {
+  const out: Diagnostic[] = [];
+  for (const [key, sub] of Object.entries(env.schema.screenMetadata)) {
+    if (key in screen.meta) {
+      for (const p of validateAgainst(screen.meta[key], sub, `screen "${screen.id}" metadata ${key}`)) {
+        out.push(diag(env, "INVALID_SCREEN_METADATA", p, screen, [screen.id]));
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * Validate one edge: endpoints, cost, condition, metadata, action types and
+ * payloads, and variable references. Used for parsed edges and for runtime
+ * registration, so both get identical checks.
+ */
+export function validateEdgeRecord(
+  e: {
+    id?: string;
+    from: string;
+    to: string;
+    cost?: number;
+    condition?: string | { source: string };
+    actions: readonly ActionDeclaration[];
+    meta: JsonObject;
+    line?: number;
+    column?: number;
+  },
+  env: RecordValidationEnv,
+): Diagnostic[] {
+  const out: Diagnostic[] = [];
+  const err = (code: string, message: string, at?: { line?: number; column?: number }, ids?: string[]) =>
+    out.push(diag(env, code, message, at, ids));
+  const options = env.options ?? {};
+  const operators = { ...BUILTIN_OPERATORS, ...(options.conditionOperators ?? {}) };
+  const label = e.id ?? `${e.from}->${e.to}`;
+
+  if (!env.hasScreen(e.from)) err("UNKNOWN_SCREEN", `Edge "${label}" references unknown screen "${e.from}"`, e, [label, e.from]);
+  if (!env.hasScreen(e.to)) err("UNKNOWN_SCREEN", `Edge "${label}" references unknown screen "${e.to}"`, e, [label, e.to]);
+  if (e.cost !== undefined && (!Number.isFinite(e.cost) || e.cost < 0)) {
+    err("INVALID_COST", `Edge "${label}" has invalid cost ${e.cost}. Costs must be finite and non-negative`, e, [label]);
+  }
+  if (e.condition !== undefined) {
+    try {
+      const cond = parseCondition(typeof e.condition === "string" ? e.condition : e.condition.source);
+      for (const op of conditionOperatorNames(cond.ast)) {
+        if (!["==", "!=", "<", "<=", ">", ">="].includes(op) && !operators[op]) {
+          err("UNKNOWN_OPERATOR", `Edge "${label}" uses unknown condition operator "${op}"`, e, [label, op]);
+        }
+      }
+      if (options.strictConditions) {
+        for (const ref of conditionRefs(cond.ast)) {
+          const root = ref.split(".")[0] as string;
+          if (!env.declarations[root]) err("UNKNOWN_CONDITION_VARIABLE", `Edge "${label}" condition references undeclared variable "${root}"`, e, [label, root]);
+        }
+      }
+    } catch (ex) {
+      err("INVALID_CONDITION", ex instanceof AppNavError ? ex.message : String(ex), e, [label]);
+    }
+  }
+  for (const [key, sub] of Object.entries(env.schema.edgeMetadata)) {
+    if (key in e.meta) {
+      for (const p of validateAgainst(e.meta[key], sub, `edge "${label}" attribute ${key}`)) {
+        err("INVALID_EDGE_METADATA", p, e, [label]);
+      }
+    }
+  }
+  e.actions.forEach((a, i) => {
+    const where = { line: a.line, column: a.column };
+    const def = env.schema.actions[a.type];
+    if (!def) {
+      err("UNKNOWN_ACTION", `Unknown action type "${a.type}" on edge "${label}"`, where, [label, a.type]);
+    } else {
+      for (const p of validateAgainst(a.data, { ...def, type: "object" }, `edge "${label}" action ${i + 1} (${a.type})`, {
+        declarations: env.declarations,
+      })) {
+        err("INVALID_ACTION_PAYLOAD", p, where, [label, a.type]);
+      }
+    }
+    if (!options.allowUndeclaredVariables) {
+      for (const name of collectReferences(a.data)) {
+        if (!env.declarations[name]) err("UNDEFINED_VARIABLE", `Edge "${label}" action ${i + 1} uses undeclared variable "${name}"`, where, [label, name]);
+      }
+    }
+  });
+  return out;
 }
 
 /** Semantic validation of a parsed graph. Never throws for graph problems. */
@@ -82,79 +195,25 @@ export function validateGraph(
     }
   }
 
+  const screens = new Set(graph.screens.map((s) => s.id));
+  const env: RecordValidationEnv = { schema: resolved, declarations: decls, hasScreen: (id) => screens.has(id), options, file };
+
   // Screens
-  const screens = new Set<string>();
+  const seenScreens = new Set<string>();
   for (const s of graph.screens) {
-    if (screens.has(s.id)) err("DUPLICATE_SCREEN", `Duplicate screen id "${s.id}"`, s, [s.id]);
-    screens.add(s.id);
-    for (const [key, sub] of Object.entries(resolved.screenMetadata)) {
-      if (key in s.meta) {
-        for (const p of validateAgainst(s.meta[key], sub, `screen "${s.id}" metadata ${key}`)) {
-          err("INVALID_SCREEN_METADATA", p, s, [s.id]);
-        }
-      } else if (sub.required) {
-        // required here is for object sub-schemas, ignore for top level keys
-      }
-    }
+    if (seenScreens.has(s.id)) err("DUPLICATE_SCREEN", `Duplicate screen id "${s.id}"`, s, [s.id]);
+    seenScreens.add(s.id);
+    out.push(...validateScreenRecord(s, env));
   }
 
   // Edges
   const explicit = new Set<string>();
-  const operators = { ...BUILTIN_OPERATORS, ...(options.conditionOperators ?? {}) };
   for (const e of graph.edges) {
-    const label = e.id ?? `${e.from}->${e.to}`;
-    if (!screens.has(e.from)) err("UNKNOWN_SCREEN", `Edge "${label}" references unknown screen "${e.from}"`, e, [label, e.from]);
-    if (!screens.has(e.to)) err("UNKNOWN_SCREEN", `Edge "${label}" references unknown screen "${e.to}"`, e, [label, e.to]);
     if (e.id !== undefined) {
       if (explicit.has(e.id)) err("DUPLICATE_EDGE", `Duplicate edge id "${e.id}"`, e, [e.id]);
       explicit.add(e.id);
     }
-    if (e.cost !== undefined && (!Number.isFinite(e.cost) || e.cost < 0)) {
-      err("INVALID_COST", `Edge "${label}" has invalid cost ${e.cost}. Costs must be finite and non-negative`, e, [label]);
-    }
-    if (e.condition !== undefined) {
-      try {
-        const cond = parseCondition(e.condition);
-        for (const op of conditionOperatorNames(cond.ast)) {
-          if (!["==", "!=", "<", "<=", ">", ">="].includes(op) && !operators[op]) {
-            err("UNKNOWN_OPERATOR", `Edge "${label}" uses unknown condition operator "${op}"`, e, [label, op]);
-          }
-        }
-        if (options.strictConditions) {
-          for (const ref of conditionRefs(cond.ast)) {
-            const root = ref.split(".")[0] as string;
-            if (!decls[root]) err("UNKNOWN_CONDITION_VARIABLE", `Edge "${label}" condition references undeclared variable "${root}"`, e, [label, root]);
-          }
-        }
-      } catch (ex) {
-        err("INVALID_CONDITION", ex instanceof AppNavError ? ex.message : String(ex), e, [label]);
-      }
-    }
-    for (const [key, sub] of Object.entries(resolved.edgeMetadata)) {
-      if (key in e.meta) {
-        for (const p of validateAgainst(e.meta[key], sub, `edge "${label}" attribute ${key}`)) {
-          err("INVALID_EDGE_METADATA", p, e, [label]);
-        }
-      }
-    }
-    e.actions.forEach((a, i) => {
-      const where = { line: a.line, column: a.column };
-      const def = resolved.actions[a.type];
-      if (!def) {
-        err("UNKNOWN_ACTION", `Unknown action type "${a.type}" on edge "${label}"`, where, [label, a.type]);
-      } else {
-        for (const p of validateAgainst(a.data, { ...def, type: "object" }, `edge "${label}" action ${i + 1} (${a.type})`, {
-          declarations: decls,
-        })) {
-          err("INVALID_ACTION_PAYLOAD", p, where, [label, a.type]);
-        }
-      }
-      if (!options.allowUndeclaredVariables) {
-        for (const name of collectReferences(a.data)) {
-          if (!decls[name]) err("UNDEFINED_VARIABLE", `Edge "${label}" action ${i + 1} uses undeclared variable "${name}"`, where, [label, name]);
-        }
-      }
-    });
+    out.push(...validateEdgeRecord(e, env));
   }
 
   const errors = out.filter((d) => d.severity === "error");

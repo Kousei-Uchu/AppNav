@@ -94,7 +94,8 @@ Errors: all extend `AppNavError` with `code`, and `file`, `line`, `column`, `ids
 - `registerScreens([tree,] ids, template?)` clones the template screen as `template:id` and copies the edges touching it. `registerEdges([tree,] edges)`, `registerActions([tree,] screenId, actions)`. Also methods on the tree and snake_case aliases (`register_screens`).
 - Remove with `unregisterScreens(idOrIdsOrTemplate)`, `unregisterEdges(ids)`, `clearDynamic()`. File screens and edges cannot be removed.
 - `createTree()` makes an empty tree. `cloneTree(tree)` makes an independent copy.
-- A failed registration changes nothing. A Path made before a removal throws when built.
+- Registered items get the same validation as a parsed graph (action types, payloads, variables, endpoints, conditions). Failures throw `ValidationError` with `diagnostics`; pass `{ diagnostics: "collect" }` to keep the valid items and record the rest in `tree.diagnostics`. A failed call changes nothing.
+- Custom action types must be declared in the tree's schema. A Path made before a removal throws when built.
 
 ## Common mistakes:
 
