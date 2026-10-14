@@ -11,6 +11,8 @@ Keep a Changelog and the project follows semantic versioning.
 - Registration is all or nothing. A failed call leaves the tree unchanged.
 - Registered screens, edges and actions are now validated with the same checks as a parsed graph, so unknown action types, bad payloads, undeclared variables and unknown endpoints are rejected with a `ValidationError`. `{ diagnostics: "collect" }` keeps the valid items instead.
 - Exposed `validateScreenRecord` and `validateEdgeRecord`, the per-item checks behind `validateGraph`.
+- `registerActions` now requires a name per action (`registerActions(screen, { remove_item: { actions } })`). The name is the node id, so actions on one screen no longer share a default id or pile up duplicate edges. The old bare-array form is rejected.
+- Registering an id that already exists is now an error instead of being ignored silently. Added `onDuplicate: "error" | "skip" | "replace"`.
 - Edge ids for registered edges are deterministic, with no random suffix.
 - Removed the `MutableGraphData` type. The no-tree form of `register_screens` no longer builds an empty tree, and now uses the default tree.
 

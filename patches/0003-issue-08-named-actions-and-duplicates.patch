@@ -1,0 +1,491 @@
+From b1517fd8ebcbb54909fa2130108a0339012d67cf Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 14 Oct 2026 13:21:23 +1100
+Subject: [PATCH] Name every registered action and handle duplicates explicitly
+ (issue 8)
+
+registerActions used a default id of "<screen>:action", so a second call on
+the same screen silently piled up parallel edges. Re-registering an existing
+screen id was ignored without a word.
+
+- registerActions(screen, { name: { actions, to?, cost?, name?, meta? } }).
+  The name is the node id. Unnamed input is rejected with a message that
+  shows the right call. Nodes record meta.parent.
+- onDuplicate: "error" (default) | "skip" | "replace" for screens and
+  explicit edge ids. Replace only touches dynamic items, rebuilds the edges
+  of a replaced screen with stable ids, and keeps the old item when the
+  replacement fails validation.
+- Tests and docs updated.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01TA5teBRYJzEcA4bcZsAuTm
+---
+ AGENTS.md             |   1 +
+ CHANGELOG.md          |   2 +
+ README.md             |  12 ++-
+ llms.txt              |   3 +-
+ src/dynamic.ts        | 165 +++++++++++++++++++++++++++++++-----------
+ tests/dynamic.test.ts | 106 ++++++++++++++++++++++++++-
+ 6 files changed, 245 insertions(+), 44 deletions(-)
+
+diff --git a/AGENTS.md b/AGENTS.md
+index 7569401..dda2b0a 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -20,6 +20,7 @@ Checklist when writing code against the API (dynamic graphs):
+ - Without a tree argument, registration uses the shared tree set by `setDefaultTree` or `setAsDefault: true`.
+ - Added items are flagged `dynamic`. Remove them with `unregisterScreens`, `unregisterEdges` or `clearDynamic`. File items cannot be removed.
+ - Registered screens, edges and actions are validated like a parsed graph. Action types must exist in the tree's schema. Failures throw `ValidationError`; `{ diagnostics: "collect" }` keeps the valid items instead.
++- `registerActions(screen, { name: { actions: [...] } })` needs a name per action. Duplicate ids error unless `onDuplicate` is `"skip"` or `"replace"`.
+ - Template copies clone incident edges when `cloneEdges` is true. A registration call is all or nothing.
+ 
+ Checklist when writing code against the API:
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 676da49..1cae0b9 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -11,6 +11,8 @@ Keep a Changelog and the project follows semantic versioning.
+ - Registration is all or nothing. A failed call leaves the tree unchanged.
+ - Registered screens, edges and actions are now validated with the same checks as a parsed graph, so unknown action types, bad payloads, undeclared variables and unknown endpoints are rejected with a `ValidationError`. `{ diagnostics: "collect" }` keeps the valid items instead.
+ - Exposed `validateScreenRecord` and `validateEdgeRecord`, the per-item checks behind `validateGraph`.
++- `registerActions` now requires a name per action (`registerActions(screen, { remove_item: { actions } })`). The name is the node id, so actions on one screen no longer share a default id or pile up duplicate edges. The old bare-array form is rejected.
++- Registering an id that already exists is now an error instead of being ignored silently. Added `onDuplicate: "error" | "skip" | "replace"`.
+ - Edge ids for registered edges are deterministic, with no random suffix.
+ - Removed the `MutableGraphData` type. The no-tree form of `register_screens` no longer builds an empty tree, and now uses the default tree.
+ 
+diff --git a/README.md b/README.md
+index 339d8a7..e2a012f 100644
+--- a/README.md
++++ b/README.md
+@@ -450,6 +450,7 @@ How it behaves:
+ - Registration is all or nothing. If any part of a call fails, the tree is left exactly as it was.
+ - Everything you register is validated with the same checks as a parsed graph: unknown screens, action types that are not in the tree's schema, payloads that break the schema, `$NAME$` references to undeclared variables, bad costs and conditions, and invalid screen or edge metadata. A failure throws a `ValidationError` whose `diagnostics` list every problem.
+ - Pass `{ diagnostics: "collect" }` as the last argument to register the valid items anyway. The invalid ones are skipped and their problems are appended to `tree.diagnostics`.
++- Registering an id that already exists is an error (`DUPLICATE_SCREEN`, or `DUPLICATE_EDGE` for an explicit edge id). Pass `{ onDuplicate: "skip" }` to keep the existing item, or `{ onDuplicate: "replace" }` to swap it, which also removes and rebuilds the edges touching a replaced screen. Only dynamic items can be skipped over or replaced; file items always stay.
+ - The schema belongs to the tree. To register a custom action type at runtime, create the tree with a schema that declares it (`indexTreeFromText(text, { schema })` or `createTree({ schema })`).
+ - Edge ids are deterministic: `from->to`, then `from->to#2`, `#3`.
+ - A `Path` holds screen ids, not copies. If you unregister a screen that a path uses, `buildInstructions` for that path throws. Recalculate after changing the tree.
+@@ -476,7 +477,16 @@ cart -> remove_item { DO TAP { "target": "Item row" } }
+ remove_item -> cart { DO SWIPE { "direction": "left" } }
+ ```
+ 
+-`registerActions(screen, actions)` creates an action node and the surrounding transitions automatically.
++`registerActions` creates action nodes and the transitions around them. Every action needs a name, which becomes the id of its node, so two actions on one screen never collide:
++
++```ts
++registerActions("cart", {
++  remove_item: { name: "Remove item", actions: [{ type: "SWIPE", data: { direction: "left" } }] },
++  clear_cart: [{ type: "TAP", data: { target: "Clear" } }], // an array is shorthand for { actions }
++});
++```
++
++Each action accepts `name`, `actions`, `to` (the screen you end on, default the parent) and `cost` (of the transition into it, default 1). An unnamed action, such as a bare array, is rejected with an error that shows the call to use.
+ 
+ ## Automatic mapping (optional)
+ 
+diff --git a/llms.txt b/llms.txt
+index 3f0b411..83d8e12 100644
+--- a/llms.txt
++++ b/llms.txt
+@@ -91,8 +91,9 @@ Errors: all extend `AppNavError` with `code`, and `file`, `line`, `column`, `ids
+ 
+ ## Dynamic registration
+ - Registration changes a live tree in place and returns it. Flags added items `dynamic: true`. One shared tree: `setDefaultTree(tree)` or `indexTreeFromText(text, { setAsDefault: true })`.
+-- `registerScreens([tree,] ids, template?)` clones the template screen as `template:id` and copies the edges touching it. `registerEdges([tree,] edges)`, `registerActions([tree,] screenId, actions)`. Also methods on the tree and snake_case aliases (`register_screens`).
++- `registerScreens([tree,] ids, template?)` clones the template screen as `template:id` and copies the edges touching it. `registerEdges([tree,] edges)`, `registerActions([tree,] screenId, { name: { actions: [...], to?, cost? } })` (every action must be named; the name is the node id). Also methods on the tree and snake_case aliases (`register_screens`).
+ - Remove with `unregisterScreens(idOrIdsOrTemplate)`, `unregisterEdges(ids)`, `clearDynamic()`. File screens and edges cannot be removed.
++- Existing ids are an error by default. `{ onDuplicate: "skip" | "replace" }` changes that (dynamic items only).
+ - `createTree()` makes an empty tree. `cloneTree(tree)` makes an independent copy.
+ - Registered items get the same validation as a parsed graph (action types, payloads, variables, endpoints, conditions). Failures throw `ValidationError` with `diagnostics`; pass `{ diagnostics: "collect" }` to keep the valid items and record the rest in `tree.diagnostics`. A failed call changes nothing.
+ - Custom action types must be declared in the tree's schema. A Path made before a removal throws when built.
+diff --git a/src/dynamic.ts b/src/dynamic.ts
+index bb42bfa..7d2afc1 100644
+--- a/src/dynamic.ts
++++ b/src/dynamic.ts
+@@ -53,8 +53,31 @@ export interface RegisterOptions extends ValidateOptions {
+    * skips the rest, and records the problems in `tree.diagnostics`.
+    */
+   diagnostics?: "throw" | "collect";
++  /**
++   * What to do when a screen id (or explicit edge id) already exists. "error"
++   * (default) reports DUPLICATE_SCREEN or DUPLICATE_EDGE. "skip" keeps the
++   * existing item. "replace" swaps in the new one; only dynamic items can be
++   * replaced, and replacing a screen also removes the edges touching it.
++   */
++  onDuplicate?: "error" | "skip" | "replace";
+ }
+ 
++/** One action registered under a screen. A bare array of actions is shorthand for `{ actions }`. */
++export interface ActionSpec {
++  /** Display name. Defaults to the action's own name. */
++  name?: string;
++  /** Actions performed by the transition. */
++  actions: ReadonlyArray<{ type: string; data?: JsonObject }>;
++  /** Screen the app is on after the action. Default: the parent screen. */
++  to?: string;
++  /** Cost of the transition into the action. Default 1. */
++  cost?: number;
++  meta?: JsonObject;
++}
++
++/** Actions to register under a screen, keyed by action name (the id of the action node). */
++export type ActionSpecMap = Record<string, ActionSpec | ActionSpec["actions"]>;
++
+ // ---------------------------------------------------------------------------
+ // Target and staging helpers
+ 
+@@ -68,6 +91,9 @@ interface Stage {
+   readonly screens: Map<string, Screen>;
+   readonly edges: Edge[];
+   readonly usedEdgeIds: Set<string>;
++  /** Existing dynamic screens and edges that new ones replace when committed. */
++  readonly replaceScreens: Set<string>;
++  readonly replaceEdges: Set<string>;
+   /** Problems found while staging, before validation runs. */
+   readonly diagnostics: Diagnostic[];
+   nextScreen: number;
+@@ -80,6 +106,8 @@ function newStage(tree: NavigationTree): Stage {
+     screens: new Map(),
+     edges: [],
+     usedEdgeIds: new Set(tree.edges.map((e) => e.id)),
++    replaceScreens: new Set(),
++    replaceEdges: new Set(),
+     diagnostics: [],
+     nextScreen: tree._nextScreenIndex(),
+     nextEdge: tree._nextEdgeIndex(),
+@@ -92,15 +120,28 @@ const getScreen = (st: Stage, id: string) => st.screens.get(id) ?? st.tree.scree
+ const problem = (st: Stage, code: string, message: string, ids: string[]) =>
+   st.diagnostics.push({ severity: "error", code, message, file: st.tree.file, ids });
+ 
+-/** Deterministic edge id: `from->to`, then `from->to#2`, `#3`, and so on. Undefined for a duplicate explicit id. */
+-function uniqueEdgeId(st: Stage, from: string, to: string, explicit?: string): string | undefined {
++/**
++ * Deterministic edge id: `from->to`, then `from->to#2`, `#3`, and so on.
++ * Returns undefined when an explicit id is a duplicate that is reported or skipped.
++ */
++function uniqueEdgeId(st: Stage, from: string, to: string, explicit?: string, mode: RegisterOptions["onDuplicate"] = "error"): string | undefined {
+   if (explicit !== undefined) {
+-    if (st.usedEdgeIds.has(explicit)) {
++    if (!st.usedEdgeIds.has(explicit)) {
++      st.usedEdgeIds.add(explicit);
++      return explicit;
++    }
++    if (mode === "skip") return undefined;
++    const existing = st.tree.edge(explicit);
++    if (mode === "replace" && existing?.dynamic && !st.replaceEdges.has(explicit)) {
++      st.replaceEdges.add(explicit);
++      return explicit;
++    }
++    if (mode === "replace" && existing && !existing.dynamic) {
++      problem(st, "NOT_DYNAMIC", `Edge "${explicit}" came from the graph file and cannot be replaced`, [explicit]);
++    } else {
+       problem(st, "DUPLICATE_EDGE", `Duplicate edge id "${explicit}"`, [explicit]);
+-      return undefined;
+     }
+-    st.usedEdgeIds.add(explicit);
+-    return explicit;
++    return undefined;
+   }
+   const base = `${from}->${to}`;
+   let id = base;
+@@ -109,6 +150,29 @@ function uniqueEdgeId(st: Stage, from: string, to: string, explicit?: string): s
+   return id;
+ }
+ 
++/**
++ * Decide whether a new screen with this id may be staged, applying the
++ * onDuplicate policy. Returns false when the id should be skipped.
++ */
++function claimScreen(st: Stage, id: string, options: RegisterOptions): boolean {
++  if (!hasScreen(st, id)) return true;
++  const mode = options.onDuplicate ?? "error";
++  if (mode === "skip") return false;
++  const existing = st.screens.has(id) ? undefined : st.tree.screens.get(id);
++  if (mode === "replace" && existing?.dynamic) {
++    st.replaceScreens.add(id);
++    // The edges that go with the old screen are removed on commit, so their ids become free again.
++    for (const e of st.tree.edges) if (e.from === id || e.to === id) st.usedEdgeIds.delete(e.id);
++    return true;
++  }
++  if (mode === "replace" && existing) {
++    problem(st, "NOT_DYNAMIC", `Screen "${id}" came from the graph file and cannot be replaced`, [id]);
++  } else {
++    problem(st, "DUPLICATE_SCREEN", `Screen "${id}" already exists. Pass onDuplicate: "skip" or "replace" to change this`, [id]);
++  }
++  return false;
++}
++
+ /**
+  * Validate everything staged with the same checks a parsed graph gets, then
+  * commit. In "throw" mode any problem aborts the whole call. In "collect" mode
+@@ -139,6 +203,10 @@ function finish(st: Stage, options: RegisterOptions): void {
+   const hasErrors = found.some((d) => d.severity === "error");
+   if (hasErrors && options.diagnostics !== "collect") throw new ValidationError(found, tree.file);
+   if (found.length > 0) tree._addDiagnostics(found);
++  // Replacements: drop the old items only when their replacement is valid.
++  for (const id of st.replaceScreens) if (st.screens.has(id) && !bad.has(id)) tree._removeScreen(id);
++  const newEdgeIds = new Set(edges.map((e) => e.id));
++  tree._removeEdges((e) => st.replaceEdges.has(e.id) && newEdgeIds.has(e.id));
+   for (const screen of st.screens.values()) if (!bad.has(screen.id)) tree._addScreen(deepFreeze(screen));
+   for (const edge of edges) tree._addEdge(deepFreeze(edge));
+ }
+@@ -209,7 +277,7 @@ function stageScreens(st: Stage, input: unknown, defaultTemplate: string | undef
+   for (const spec of normalizeScreenSpecs(input, defaultTemplate)) {
+     const tpl = spec.template ?? spec.cloneFrom ?? spec.from ?? defaultTemplate;
+     const newId = tpl && !spec.id.startsWith(`${tpl}:`) ? `${tpl}:${spec.id}` : spec.id;
+-    if (hasScreen(st, newId)) continue;
++    if (!claimScreen(st, newId, options)) continue;
+ 
+     const base = tpl ? getScreen(st, tpl) : undefined;
+     if (tpl && !base) {
+@@ -248,7 +316,7 @@ function stageScreens(st: Stage, input: unknown, defaultTemplate: string | undef
+   }
+ }
+ 
+-function stageEdges(st: Stage, input: unknown): void {
++function stageEdges(st: Stage, input: unknown, options: RegisterOptions): void {
+   for (const spec of normalizeEdgeSpecs(input)) {
+     let condition: Edge["condition"];
+     if (spec.condition) {
+@@ -259,7 +327,7 @@ function stageEdges(st: Stage, input: unknown): void {
+         continue;
+       }
+     }
+-    const id = uniqueEdgeId(st, spec.from, spec.to, spec.id);
++    const id = uniqueEdgeId(st, spec.from, spec.to, spec.id, options.onDuplicate);
+     if (id === undefined) continue;
+     st.edges.push({
+       id,
+@@ -312,45 +380,60 @@ export function registerEdges(...args: unknown[]): NavigationTree {
+   const { tree, rest } = splitTarget(args);
+   const options = (isPlainObject(rest[1]) ? rest[1] : {}) as RegisterOptions;
+   const st = newStage(tree);
+-  stageEdges(st, rest[0]);
++  stageEdges(st, rest[0], options);
+   finish(st, options);
+   return tree;
+ }
+ 
++/** Stage action nodes under `parent`. Each key of the input is the id of one action node. */
++function stageActions(st: Stage, parent: string, input: unknown, options: RegisterOptions): void {
++  const usage = `registerActions(screen, { remove_item: { actions: [...] } })`;
++  if (!isPlainObject(input) || Object.keys(input).length === 0 || typeof input.type === "string") {
++    problem(st, "INVALID_ACTION_REGISTRATION", `Each action needs a name. Use ${usage}`, [parent]);
++    return;
++  }
++  for (const [name, raw] of Object.entries(input)) {
++    const spec = Array.isArray(raw) ? { actions: raw } : isPlainObject(raw) ? raw : undefined;
++    if (!spec || !Array.isArray(spec.actions)) {
++      problem(st, "INVALID_ACTION_REGISTRATION", `Action "${name}" must be an array of actions or an object with an "actions" array. Use ${usage}`, [name]);
++      continue;
++    }
++    if (!claimScreen(st, name, options)) continue;
++    const destination = typeof spec.to === "string" ? spec.to : parent;
++    st.screens.set(name, {
++      id: name,
++      name: typeof spec.name === "string" ? spec.name : name,
++      meta: { ...(isPlainObject(spec.meta) ? cloneJson(spec.meta as JsonObject) : {}), kind: "action", parent } as JsonObject,
++      index: st.nextScreen++,
++      dynamic: true,
++    });
++    stageEdges(
++      st,
++      [
++        { from: parent, to: name, cost: typeof spec.cost === "number" ? spec.cost : 1, actions: [] },
++        { from: name, to: destination, actions: spec.actions },
++      ],
++      options,
++    );
++  }
++}
++
+ /**
+- * Register an action node under a screen: the parent screen gets an edge to the
+- * new node, and the node gets an edge to `targetScreenId` (default the parent)
+- * carrying the actions. Returns the same tree.
++ * Register action nodes under a screen, in place. Each key is the name (and id)
++ * of one action node: the parent screen gets an edge to the node, and the node
++ * gets an edge to `to` (default the parent) carrying the actions.
++ *
++ * `registerActions("cart", { remove_item: { actions: [{ type: "SWIPE", data: { direction: "left" } }] } })`
++ *
++ * A bare array is shorthand for `{ actions }`. Names are required, so two
++ * actions on one screen never collide. Returns the same tree.
+  */
+ export function registerActions(...args: unknown[]): NavigationTree {
+   const { tree, rest } = splitTarget(args);
+-  const [screenId, actionsInput, third, fourth] = rest;
+-  const parent = String(screenId);
+-  const destination = typeof third === "string" ? third : parent;
+-  const options = (isPlainObject(third) ? third : isPlainObject(fourth) ? fourth : {}) as RegisterOptions;
+-  const normalized = Array.isArray(actionsInput)
+-    ? actionsInput
+-    : isPlainObject(actionsInput) && Array.isArray(actionsInput.actions)
+-      ? actionsInput.actions
+-      : isPlainObject(actionsInput)
+-        ? Object.entries(actionsInput).map(([type, value]) => ({ type, data: value }))
+-        : [];
+-  const actionId = isPlainObject(actionsInput) && typeof actionsInput.id === "string" ? actionsInput.id : `${parent}:action`;
+-
++  const [screenId, input, optionsArg] = rest;
++  const options = (isPlainObject(optionsArg) ? optionsArg : {}) as RegisterOptions;
+   const st = newStage(tree);
+-  if (!hasScreen(st, actionId)) {
+-    st.screens.set(actionId, {
+-      id: actionId,
+-      name: isPlainObject(actionsInput) && typeof actionsInput.name === "string" ? actionsInput.name : `Action ${actionId}`,
+-      meta: { kind: "action" } as JsonObject,
+-      index: st.nextScreen++,
+-      dynamic: true,
+-    });
+-  }
+-  stageEdges(st, [
+-    { from: parent, to: actionId, actions: [] },
+-    { from: actionId, to: destination, actions: normalized },
+-  ]);
++  stageActions(st, String(screenId), input, options);
+   finish(st, options);
+   return tree;
+ }
+@@ -363,7 +446,7 @@ export function augmentTree(...args: unknown[]): NavigationTree {
+     const st = newStage(tree);
+     const options = (isPlainObject(rest[1]) ? rest[1] : {}) as RegisterOptions;
+     if (patch.screens) stageScreens(st, patch.screens, typeof patch.template === "string" ? patch.template : undefined, options);
+-    if (patch.edges) stageEdges(st, patch.edges);
++    if (patch.edges) stageEdges(st, patch.edges, options);
+     finish(st, options);
+   }
+   return tree;
+@@ -450,7 +533,7 @@ declare module "./graph" {
+     addScreens(input: unknown, template?: string | RegisterOptions, options?: RegisterOptions): NavigationTree;
+     registerEdges(input: unknown, options?: RegisterOptions): NavigationTree;
+     addEdges(input: unknown, options?: RegisterOptions): NavigationTree;
+-    registerActions(screenId: string, actions: unknown, targetScreenId?: string | RegisterOptions, options?: RegisterOptions): NavigationTree;
++    registerActions(screenId: string, actions: ActionSpecMap, options?: RegisterOptions): NavigationTree;
+     unregisterScreens(selector: ScreenSelector): NavigationTree;
+     unregisterEdges(ids: string | readonly string[]): NavigationTree;
+     clearDynamic(): NavigationTree;
+diff --git a/tests/dynamic.test.ts b/tests/dynamic.test.ts
+index 00148fd..5ed0612 100644
+--- a/tests/dynamic.test.ts
++++ b/tests/dynamic.test.ts
+@@ -269,7 +269,7 @@ describe("validation of registered items", () => {
+ 
+   it("validates registerActions payloads too", () => {
+     const tree = indexTreeFromText(VARS);
+-    const err = failure(() => tree.registerActions("a", [{ type: "REMOVE_ITEM", data: {} }]));
++    const err = failure(() => tree.registerActions("a", { remove_item: [{ type: "REMOVE_ITEM", data: {} }] }));
+     expect(codesOf(err)).toContain("UNKNOWN_ACTION");
+     expect(tree.screens.size).toBe(2);
+   });
+@@ -297,3 +297,107 @@ describe("validation of registered items", () => {
+     expect(tree.diagnostics.map((d) => d.code).sort()).toEqual(["UNKNOWN_ACTION", "UNKNOWN_SCREEN"]);
+   });
+ });
++
++describe("named actions", () => {
++  const swipe = { type: "SWIPE", data: { direction: "left" } };
++
++  it("creates one node per name, so actions on one screen never collide", () => {
++    const tree = indexTreeFromText(BASE);
++    registerScreens(tree, [{ id: "x" }]);
++    tree.registerActions("cart", {
++      remove_item: { name: "Remove item", actions: [swipe] },
++      clear_cart: [{ type: "TAP", data: { target: "Clear" } }],
++    });
++    expect(tree.screen("remove_item").name).toBe("Remove item");
++    expect(tree.screen("remove_item").meta).toMatchObject({ kind: "action", parent: "cart" });
++    expect(tree.screen("clear_cart").name).toBe("clear_cart");
++    expect(tree.screen("remove_item").dynamic).toBe(true);
++    const into = tree.outgoing("cart").filter((e) => e.to === "remove_item" || e.to === "clear_cart");
++    expect(into.map((e) => e.id)).toEqual(["cart->remove_item", "cart->clear_cart"]);
++    expect(tree.outgoing("remove_item")).toHaveLength(1);
++  });
++
++  it("honours to and cost", () => {
++    const tree = indexTreeFromText(BASE);
++    tree.registerActions("cart", { open: { actions: [swipe], to: "item_settings", cost: 3 } });
++    expect(tree.edge("cart->open")?.cost).toBe(3);
++    expect(tree.edge("open->item_settings")).toBeDefined();
++  });
++
++  it("rejects unnamed actions with a message that shows the right call", () => {
++    const tree = indexTreeFromText(BASE);
++    const err = failure(() => tree.registerActions("cart", [swipe] as never));
++    expect(codesOf(err)).toEqual(["INVALID_ACTION_REGISTRATION"]);
++    expect(err.message).toMatch(/needs a name/);
++    expect(codesOf(failure(() => tree.registerActions("cart", swipe as never)))).toEqual(["INVALID_ACTION_REGISTRATION"]);
++    expect(codesOf(failure(() => tree.registerActions("cart", { bad: 5 } as never)))).toEqual(["INVALID_ACTION_REGISTRATION"]);
++  });
++
++  it("rejects a name that is already taken instead of piling up parallel edges", () => {
++    const tree = indexTreeFromText(BASE);
++    tree.registerActions("cart", { remove_item: [swipe] });
++    const edges = tree.edges.length;
++    expect(codesOf(failure(() => tree.registerActions("cart", { remove_item: [swipe] })))).toEqual(["DUPLICATE_SCREEN"]);
++    expect(tree.edges.length).toBe(edges);
++  });
++});
++
++describe("onDuplicate", () => {
++  it("errors by default when a screen id already exists", () => {
++    const tree = indexTreeFromText(BASE);
++    registerScreens(tree, ["p1"], "item_settings");
++    expect(codesOf(failure(() => registerScreens(tree, ["p1"], "item_settings")))).toEqual(["DUPLICATE_SCREEN"]);
++    expect(codesOf(failure(() => registerScreens(tree, [{ id: "home" }])))).toEqual(["DUPLICATE_SCREEN"]);
++  });
++
++  it("skip keeps the existing screen and adds the rest", () => {
++    const tree = indexTreeFromText(BASE);
++    registerScreens(tree, [{ id: "p1", name: "First" }], "item_settings");
++    registerScreens(tree, [{ id: "p1", name: "Changed" }, { id: "p2" }], "item_settings", { onDuplicate: "skip" });
++    expect(tree.screen("item_settings:p1").name).toBe("First");
++    expect(tree.hasScreen("item_settings:p2")).toBe(true);
++  });
++
++  it("replace swaps in the new screen and rebuilds its edges with the same ids", () => {
++    const tree = indexTreeFromText(BASE);
++    registerScreens(tree, [{ id: "p1", name: "First" }], "item_settings");
++    const before = tree.edges.map((e) => e.id).sort();
++    registerScreens(tree, [{ id: "p1", name: "Second" }], "item_settings", { onDuplicate: "replace" });
++    expect(tree.screen("item_settings:p1").name).toBe("Second");
++    expect(tree.edges.map((e) => e.id).sort()).toEqual(before);
++  });
++
++  it("replace works for action nodes", () => {
++    const tree = indexTreeFromText(BASE);
++    tree.registerActions("cart", { remove_item: [{ type: "TAP", data: { target: "Old" } }] });
++    tree.registerActions("cart", { remove_item: [{ type: "TAP", data: { target: "New" } }] }, { onDuplicate: "replace" });
++    expect(tree.outgoing("remove_item")[0]?.actions[0]?.data).toEqual({ target: "New" });
++    expect(tree.edges.filter((e) => e.to === "remove_item")).toHaveLength(1);
++  });
++
++  it("replace never touches screens or edges from the graph file", () => {
++    const tree = indexTreeFromText(BASE);
++    expect(codesOf(failure(() => registerScreens(tree, [{ id: "home" }], { onDuplicate: "replace" })))).toEqual(["NOT_DYNAMIC"]);
++    expect(codesOf(failure(() => registerEdges(tree, [{ from: "home", to: "cart", id: "home->cart" }], { onDuplicate: "replace" })))).toEqual([
++      "NOT_DYNAMIC",
++    ]);
++  });
++
++  it("applies to explicit edge ids", () => {
++    const tree = indexTreeFromText(BASE);
++    registerEdges(tree, [{ from: "home", to: "done", id: "shortcut", cost: 5 }]);
++    expect(codesOf(failure(() => registerEdges(tree, [{ from: "home", to: "done", id: "shortcut" }])))).toEqual(["DUPLICATE_EDGE"]);
++    registerEdges(tree, [{ from: "home", to: "done", id: "shortcut", cost: 9 }], { onDuplicate: "skip" });
++    expect(tree.edge("shortcut")?.cost).toBe(5);
++    registerEdges(tree, [{ from: "home", to: "done", id: "shortcut", cost: 9 }], { onDuplicate: "replace" });
++    expect(tree.edge("shortcut")?.cost).toBe(9);
++    expect(tree.edges.filter((e) => e.id === "shortcut")).toHaveLength(1);
++  });
++
++  it("a replacement that fails validation leaves the old screen in place", () => {
++    const tree = createTree({ schema: { schemaVersion: 1, extends: "default", screenMetadata: { icon: { type: "string" } } } });
++    registerScreens(tree, [{ id: "s", meta: { icon: "star" } }]);
++    registerScreens(tree, [{ id: "s", meta: { icon: 5 } }], { onDuplicate: "replace", diagnostics: "collect" });
++    expect(tree.screen("s").meta).toEqual({ icon: "star" });
++  });
++});
+-- 
+2.43.0
+

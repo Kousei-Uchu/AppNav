@@ -450,6 +450,7 @@ How it behaves:
 - Registration is all or nothing. If any part of a call fails, the tree is left exactly as it was.
 - Everything you register is validated with the same checks as a parsed graph: unknown screens, action types that are not in the tree's schema, payloads that break the schema, `$NAME$` references to undeclared variables, bad costs and conditions, and invalid screen or edge metadata. A failure throws a `ValidationError` whose `diagnostics` list every problem.
 - Pass `{ diagnostics: "collect" }` as the last argument to register the valid items anyway. The invalid ones are skipped and their problems are appended to `tree.diagnostics`.
+- Registering an id that already exists is an error (`DUPLICATE_SCREEN`, or `DUPLICATE_EDGE` for an explicit edge id). Pass `{ onDuplicate: "skip" }` to keep the existing item, or `{ onDuplicate: "replace" }` to swap it, which also removes and rebuilds the edges touching a replaced screen. Only dynamic items can be skipped over or replaced; file items always stay.
 - The schema belongs to the tree. To register a custom action type at runtime, create the tree with a schema that declares it (`indexTreeFromText(text, { schema })` or `createTree({ schema })`).
 - Edge ids are deterministic: `from->to`, then `from->to#2`, `#3`.
 - A `Path` holds screen ids, not copies. If you unregister a screen that a path uses, `buildInstructions` for that path throws. Recalculate after changing the tree.
@@ -476,7 +477,16 @@ cart -> remove_item { DO TAP { "target": "Item row" } }
 remove_item -> cart { DO SWIPE { "direction": "left" } }
 ```
 
-`registerActions(screen, actions)` creates an action node and the surrounding transitions automatically.
+`registerActions` creates action nodes and the transitions around them. Every action needs a name, which becomes the id of its node, so two actions on one screen never collide:
+
+```ts
+registerActions("cart", {
+  remove_item: { name: "Remove item", actions: [{ type: "SWIPE", data: { direction: "left" } }] },
+  clear_cart: [{ type: "TAP", data: { target: "Clear" } }], // an array is shorthand for { actions }
+});
+```
+
+Each action accepts `name`, `actions`, `to` (the screen you end on, default the parent) and `cost` (of the transition into it, default 1). An unnamed action, such as a bare array, is rejected with an error that shows the call to use.
 
 ## Automatic mapping (optional)
 

@@ -269,7 +269,7 @@ describe("validation of registered items", () => {
 
   it("validates registerActions payloads too", () => {
     const tree = indexTreeFromText(VARS);
-    const err = failure(() => tree.registerActions("a", [{ type: "REMOVE_ITEM", data: {} }]));
+    const err = failure(() => tree.registerActions("a", { remove_item: [{ type: "REMOVE_ITEM", data: {} }] }));
     expect(codesOf(err)).toContain("UNKNOWN_ACTION");
     expect(tree.screens.size).toBe(2);
   });
@@ -295,5 +295,109 @@ describe("validation of registered items", () => {
     expect(tree.edge("bad")).toBeUndefined();
     expect(tree.edge("worse")).toBeUndefined();
     expect(tree.diagnostics.map((d) => d.code).sort()).toEqual(["UNKNOWN_ACTION", "UNKNOWN_SCREEN"]);
+  });
+});
+
+describe("named actions", () => {
+  const swipe = { type: "SWIPE", data: { direction: "left" } };
+
+  it("creates one node per name, so actions on one screen never collide", () => {
+    const tree = indexTreeFromText(BASE);
+    registerScreens(tree, [{ id: "x" }]);
+    tree.registerActions("cart", {
+      remove_item: { name: "Remove item", actions: [swipe] },
+      clear_cart: [{ type: "TAP", data: { target: "Clear" } }],
+    });
+    expect(tree.screen("remove_item").name).toBe("Remove item");
+    expect(tree.screen("remove_item").meta).toMatchObject({ kind: "action", parent: "cart" });
+    expect(tree.screen("clear_cart").name).toBe("clear_cart");
+    expect(tree.screen("remove_item").dynamic).toBe(true);
+    const into = tree.outgoing("cart").filter((e) => e.to === "remove_item" || e.to === "clear_cart");
+    expect(into.map((e) => e.id)).toEqual(["cart->remove_item", "cart->clear_cart"]);
+    expect(tree.outgoing("remove_item")).toHaveLength(1);
+  });
+
+  it("honours to and cost", () => {
+    const tree = indexTreeFromText(BASE);
+    tree.registerActions("cart", { open: { actions: [swipe], to: "item_settings", cost: 3 } });
+    expect(tree.edge("cart->open")?.cost).toBe(3);
+    expect(tree.edge("open->item_settings")).toBeDefined();
+  });
+
+  it("rejects unnamed actions with a message that shows the right call", () => {
+    const tree = indexTreeFromText(BASE);
+    const err = failure(() => tree.registerActions("cart", [swipe] as never));
+    expect(codesOf(err)).toEqual(["INVALID_ACTION_REGISTRATION"]);
+    expect(err.message).toMatch(/needs a name/);
+    expect(codesOf(failure(() => tree.registerActions("cart", swipe as never)))).toEqual(["INVALID_ACTION_REGISTRATION"]);
+    expect(codesOf(failure(() => tree.registerActions("cart", { bad: 5 } as never)))).toEqual(["INVALID_ACTION_REGISTRATION"]);
+  });
+
+  it("rejects a name that is already taken instead of piling up parallel edges", () => {
+    const tree = indexTreeFromText(BASE);
+    tree.registerActions("cart", { remove_item: [swipe] });
+    const edges = tree.edges.length;
+    expect(codesOf(failure(() => tree.registerActions("cart", { remove_item: [swipe] })))).toEqual(["DUPLICATE_SCREEN"]);
+    expect(tree.edges.length).toBe(edges);
+  });
+});
+
+describe("onDuplicate", () => {
+  it("errors by default when a screen id already exists", () => {
+    const tree = indexTreeFromText(BASE);
+    registerScreens(tree, ["p1"], "item_settings");
+    expect(codesOf(failure(() => registerScreens(tree, ["p1"], "item_settings")))).toEqual(["DUPLICATE_SCREEN"]);
+    expect(codesOf(failure(() => registerScreens(tree, [{ id: "home" }])))).toEqual(["DUPLICATE_SCREEN"]);
+  });
+
+  it("skip keeps the existing screen and adds the rest", () => {
+    const tree = indexTreeFromText(BASE);
+    registerScreens(tree, [{ id: "p1", name: "First" }], "item_settings");
+    registerScreens(tree, [{ id: "p1", name: "Changed" }, { id: "p2" }], "item_settings", { onDuplicate: "skip" });
+    expect(tree.screen("item_settings:p1").name).toBe("First");
+    expect(tree.hasScreen("item_settings:p2")).toBe(true);
+  });
+
+  it("replace swaps in the new screen and rebuilds its edges with the same ids", () => {
+    const tree = indexTreeFromText(BASE);
+    registerScreens(tree, [{ id: "p1", name: "First" }], "item_settings");
+    const before = tree.edges.map((e) => e.id).sort();
+    registerScreens(tree, [{ id: "p1", name: "Second" }], "item_settings", { onDuplicate: "replace" });
+    expect(tree.screen("item_settings:p1").name).toBe("Second");
+    expect(tree.edges.map((e) => e.id).sort()).toEqual(before);
+  });
+
+  it("replace works for action nodes", () => {
+    const tree = indexTreeFromText(BASE);
+    tree.registerActions("cart", { remove_item: [{ type: "TAP", data: { target: "Old" } }] });
+    tree.registerActions("cart", { remove_item: [{ type: "TAP", data: { target: "New" } }] }, { onDuplicate: "replace" });
+    expect(tree.outgoing("remove_item")[0]?.actions[0]?.data).toEqual({ target: "New" });
+    expect(tree.edges.filter((e) => e.to === "remove_item")).toHaveLength(1);
+  });
+
+  it("replace never touches screens or edges from the graph file", () => {
+    const tree = indexTreeFromText(BASE);
+    expect(codesOf(failure(() => registerScreens(tree, [{ id: "home" }], { onDuplicate: "replace" })))).toEqual(["NOT_DYNAMIC"]);
+    expect(codesOf(failure(() => registerEdges(tree, [{ from: "home", to: "cart", id: "home->cart" }], { onDuplicate: "replace" })))).toEqual([
+      "NOT_DYNAMIC",
+    ]);
+  });
+
+  it("applies to explicit edge ids", () => {
+    const tree = indexTreeFromText(BASE);
+    registerEdges(tree, [{ from: "home", to: "done", id: "shortcut", cost: 5 }]);
+    expect(codesOf(failure(() => registerEdges(tree, [{ from: "home", to: "done", id: "shortcut" }])))).toEqual(["DUPLICATE_EDGE"]);
+    registerEdges(tree, [{ from: "home", to: "done", id: "shortcut", cost: 9 }], { onDuplicate: "skip" });
+    expect(tree.edge("shortcut")?.cost).toBe(5);
+    registerEdges(tree, [{ from: "home", to: "done", id: "shortcut", cost: 9 }], { onDuplicate: "replace" });
+    expect(tree.edge("shortcut")?.cost).toBe(9);
+    expect(tree.edges.filter((e) => e.id === "shortcut")).toHaveLength(1);
+  });
+
+  it("a replacement that fails validation leaves the old screen in place", () => {
+    const tree = createTree({ schema: { schemaVersion: 1, extends: "default", screenMetadata: { icon: { type: "string" } } } });
+    registerScreens(tree, [{ id: "s", meta: { icon: "star" } }]);
+    registerScreens(tree, [{ id: "s", meta: { icon: 5 } }], { onDuplicate: "replace", diagnostics: "collect" });
+    expect(tree.screen("s").meta).toEqual({ icon: "star" });
   });
 });
